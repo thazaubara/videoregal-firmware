@@ -1,4 +1,4 @@
-## FW Spec (September 9, 2026, Rev 2)
+## FW Spec (September 9, 2026, Rev 3)
 
 Die Firmware läuft auf einem Raspberry Pi Pico (RP2040), ist in MicroPython geschrieben und kommuniziert über UART (JSON, 115200 Baud) mit einem Raspberry Pi 4, der die übergeordnete Logik steuert. 
 
@@ -121,6 +121,15 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
     
     - Asynchrones Event!
 
+- Push Message (Boot)
+
+    ```json
+    {"event": "boot"}\n
+    ```
+    
+    - Wird einmal beim Start des Pico gesendet, bevor auf den Pi4 gewartet wird.
+      Der Pi4 kann das als "Pico ist bereit"-Signal nutzen.
+
 **Funktionen**
 
 - Power Monitoring:
@@ -135,12 +144,17 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         - Hook inactive: Main LED “dim”, Logo LED “bright”
 - LED switching
     - PWM Frequenz fix. Helligkeit über Duty Cycle.
-    - Interne Keywords “bright” und “dim”. für jede LED.
-    Initial: bright: über Poti auslesbar. dim: 15%.
-    - Standardmäßig fade von 1000ms, optionaler parameter.
+    - Interne Keywords "bright" und "dim". für jede LED.
+    Initial: bright: über Poti auslesbar, das Poti regelt im Bereich
+    dim bis 100% ("bright" ist nie dunkler als "dim"). dim: 5%.
+    - Standardmäßig fade von 700ms, optionaler parameter.
     - Poti auslesen gibt Rauschen. Hysterese von 5% einbauen.
-- Battery Percentage Track in Firmware based on voltage- 5 Bars.
-    - Use LUT to estimate Battery charge. Return in 20% bracket
+        - LEDs, die auf "bright" gesetzt wurden, folgen dem Poti live
+          mit kurzem Fade (100ms). LEDs mit festem Wert oder "dim"
+          folgen dem Poti nicht.
+- Battery Percentage Track in Firmware based on voltage.
+    - Lineare LUT in 10%-Schritten, Range 10.0 V (0%) bis 16.8 V (100%).
+      Rückgabewert ist die Bracket-Untergrenze (0, 10, 20, ... 100).
 - Display on/off
     - Switch display off ar startup. when first message is received from pi4, then switch it on.
 
@@ -151,10 +165,12 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
     - Hardware Functions and Classes below.
     - Setup:
         - Init Hardware
-        - Initial State of Leds: breathing from 10-20%. 
+        - Initial State of Leds: breathing from 1-10%. 
         Indicates waiting for Pi4 startup & connection.
         Use extra non blocking loop for that before entering main Loop.
-        - If first message from Pi4 is received: Activate loop and set LEDs to initial Condition (based on hook). 
+        - If first message from Pi4 is received: Activate loop, switch display on
+        and set LEDs to initial Condition (based on hook). Der erste Fade startet
+        dabei von der aktuellen Atem-Helligkeit (kein Sprung). 
         Indicates normal program flow.
     - Loop:
         - Get Message from Uart

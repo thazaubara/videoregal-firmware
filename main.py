@@ -106,8 +106,8 @@ def init_hardware():
     global uart, i2c, pwm_main, pwm_logo, hook_pin, hook_active, display_pin
     global poti_adc, bright_percent
 
-    # UART zum Pi4
-    uart = UART(UART_ID, baudrate=UART_BAUD, tx=UART_TX_PIN, rx=UART_RX_PIN)
+    # UART zum Pi4 (rxbuf: genug Platz fuer eine volle JSON-Zeile)
+    uart = UART(UART_ID, baudrate=UART_BAUD, tx=UART_TX_PIN, rx=UART_RX_PIN, rxbuf=256)
 
     # I2C fuer die INA219 Sensoren
     i2c = I2C(0, sda=Pin(I2C_SDA_PIN), scl=Pin(I2C_SCL_PIN), freq=I2C_FREQ_HZ)
@@ -161,10 +161,10 @@ def update_bright_percent():
     measured = read_poti_percent()
     if abs(measured - bright_percent) > POTI_HYSTERESIS_PERCENT:
         bright_percent = measured
-        # LEDs auf "bright" auf den neuen Wert nachziehen
+        # LEDs auf "bright" sofort auf den neuen Wert setzen (kein Fade)
         for name in ("main", "logo"):
             if led_state[name]["follow_poti"]:
-                start_fade(name, bright_percent, FADE_DEFAULT_MS, True)
+                start_fade(name, bright_percent, 100, True)
 
 def get_bright_percent():
     # Wert fuer das Keyword "bright". Wird vom Poti bestimmt.
@@ -212,10 +212,6 @@ def update_led_fades():
             state["current"] = state["from"] + (state["target"] - state["from"]) * progress
         set_led_percent(get_pwm(name), state["current"])
 
-def get_bright_percent():
-    # Wert fuer das Keyword "bright". Wird vom Poti bestimmt.
-    return bright_percent
-
 def resolve_led_value(value):
     # Zahl (0-100) oder Keyword ("bright"/"dim") aufloesen.
     # Liefert (prozent, follow_poti) oder (None, False) bei ungueltigem Wert.
@@ -223,7 +219,8 @@ def resolve_led_value(value):
         return get_bright_percent(), True
     if value == "dim":
         return DIM_PERCENT, False
-    if isinstance(value, (int, float)) and 0 <= value <= 100:
+    # bool ist in Python auch int -> explizit ausschliessen
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100:
         return value, False
     return None, False
 
@@ -239,8 +236,8 @@ def is_hook_active_now():
 def wait_for_host():
     global host_connected
 
-    # LEDs atmen von 10-20%, bis die erste Nachricht vom Pi4 kommt.
-    # Atemzyklus als Sinuskurve, Frequenz aus der Konfiguration.
+    # LEDs atmen langsam (Werte siehe Konfiguration oben),
+    # bis die erste Nachricht vom Pi4 kommt.
 
     # Test: Lebenszeichen an den Pi senden (prueft TX-Richtung)
     send_json({"event": "boot"})
@@ -294,6 +291,13 @@ def read_message():
         print("UART roh empfangen:", repr(data))
 
     uart_buffer += data
+
+    # Schutz: Muell ohne Zeilenende darf den Puffer nicht endlos wachsen lassen
+    if len(uart_buffer) > 512:
+        uart_buffer = ""
+        if DEBUG:
+            print("UART: Puffer uebergelaufen, verworfen")
+        return None
 
     if "\n" in uart_buffer:
         line, uart_buffer = uart_buffer.split("\n", 1)
