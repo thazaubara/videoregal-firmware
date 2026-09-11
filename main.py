@@ -52,9 +52,6 @@ HOOK_DEBOUNCE_MS = 30
 POTI_PIN = 27              # GP27 (ADC)
 POTI_HYSTERESIS_PERCENT = 5
 
-# Display Enable (MOSFET)
-DISPLAY_PIN = 10   # GP10
-
 # Akku (V-Mount 4S, 10.0 - 16.8 V)
 # Lineare LUT: Spannungsschwelle -> Ladezustand in 10%-Schritten
 BAT_LUT = [
@@ -92,9 +89,6 @@ hook_event_time = 0      # Zeitpunkt des letzten Hook-Interrupts (fuer Debounce)
 hook_active = False      # True = Hoerer abgehoben
 hook_pin = None          # Pin Objekt, wird in init_hardware() angelegt
 
-display_pin = None       # Pin Objekt, wird in init_hardware() angelegt
-display_enabled = False  # aktueller Display-Zustand
-
 poti_adc = None          # ADC Objekt, wird in init_hardware() angelegt
 bright_percent = 80      # aktuell gueltiger "bright"-Wert aus dem Poti (mit Hysterese)
 
@@ -103,7 +97,7 @@ host_connected = False   # True ab erster Nachricht vom Pi4
 # --- Hardware Initialisierung -----------------------------------
 
 def init_hardware():
-    global uart, i2c, pwm_main, pwm_logo, hook_pin, hook_active, display_pin
+    global uart, i2c, pwm_main, pwm_logo, hook_pin, hook_active
     global poti_adc, bright_percent
 
     # UART zum Pi4 (rxbuf: genug Platz fuer eine volle JSON-Zeile)
@@ -131,19 +125,9 @@ def init_hardware():
     # Startzustand einlesen
     hook_active = is_hook_active_now()
 
-    # Display Enable (MOSFET). Aus beim Start, geht an, sobald der Pi4 lebt.
-    display_pin = Pin(DISPLAY_PIN, Pin.OUT)
-    display_pin.value(0)
-
     # Helligkeits-Poti
     poti_adc = ADC(POTI_PIN)
     bright_percent = read_poti_percent()  # Startwert einmal ohne Hysterese lesen
-
-def set_display(enabled):
-    # Schaltet die 5V Versorgung des Displays per MOSFET
-    global display_enabled
-    display_pin.value(1 if enabled else 0)
-    display_enabled = enabled
 
 # --- Helligkeits-Poti -----------------------------------------------
 
@@ -267,7 +251,6 @@ def wait_for_host():
         msg = read_message()
         if msg is not None:
             host_connected = True
-            set_display(True)    # Pi4 lebt -> Display einschalten
             handle_message(msg)  # direkt beantworten (z.B. get_telemetry)
             apply_hook_leds()    # LEDs aus der Atem-Phase in Hook-Grundstellung
             break
@@ -328,8 +311,6 @@ def handle_message(msg):
 
     if cmd == "set_led":
         handle_set_led(msg)
-    elif cmd == "set_display":
-        handle_set_display(msg)
     elif cmd == "get_telemetry":
         send_json(get_telemetry_response())
     else:

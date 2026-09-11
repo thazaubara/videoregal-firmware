@@ -36,9 +36,6 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
     - Digital In Pin GP2
 - BRIGHTNESS POTI
     - Analog In Pin GP27
-- DISPLAY ENABLE
-    - Digital Pin GP10
-    - MOSFET to enable or disable 5V for Display
 
 **UART communication to host**
 
@@ -64,25 +61,6 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         "data": {
         	"main": 80,
         	"logo": 20
-        	}
-        }\n
-        ```
-    
-- Turn on/off DISPLAY
-    - Pi4 → Pico:
-      
-        ```json
-        {"cmd": "set_display", "enabled": true}\n
-        ```
-        
-    - Pico → Pi4:
-      
-        ```json
-        {
-        "status": "ok", 
-        "cmd": "set_display,
-        "data": {
-        	"enabled": true
         	}
         }\n
         ```
@@ -155,8 +133,6 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
 - Battery Percentage Track in Firmware based on voltage.
     - Lineare LUT in 10%-Schritten, Range 10.0 V (0%) bis 16.8 V (100%).
       Rückgabewert ist die Bracket-Untergrenze (0, 10, 20, ... 100).
-- Display on/off
-    - Switch display off ar startup. when first message is received from pi4, then switch it on.
 
 **FW Architecture & Mode of Operations**
 
@@ -168,8 +144,7 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         - Initial State of Leds: breathing from 1-10%. 
         Indicates waiting for Pi4 startup & connection.
         Use extra non blocking loop for that before entering main Loop.
-        - If first message from Pi4 is received: Activate loop, switch display on
-        and set LEDs to initial Condition (based on hook). Der erste Fade startet
+        - If first message from Pi4 is received: Activate loop, set LEDs to initial Condition (based on hook). Der erste Fade startet
         dabei von der aktuellen Atem-Helligkeit (kein Sprung). 
         Indicates normal program flow.
     - Loop:
