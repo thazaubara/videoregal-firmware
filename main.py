@@ -48,6 +48,11 @@ HOOK_PIN = 2             # GP2
 HOOK_ACTIVE_HIGH = True  # False = Logik umkehren
 HOOK_DEBOUNCE_MS = 30
 
+# 2. Digital Input (Debug)
+DEBUG_IN_PIN = 3           # GP3
+DEBUG_IN_ACTIVE_HIGH = True  # False = Logik umkehren
+DEBUG_IN_DEBOUNCE_MS = 30
+
 # Helligkeits-Poti
 POTI_PIN = 27              # GP27 (ADC)
 POTI_HYSTERESIS_PERCENT = 5
@@ -89,6 +94,11 @@ hook_event_time = 0      # Zeitpunkt des letzten Hook-Interrupts (fuer Debounce)
 hook_active = False      # True = Hoerer abgehoben
 hook_pin = None          # Pin Objekt, wird in init_hardware() angelegt
 
+debug_in_event_flag = False  # wird vom Debug-Input-Interrupt gesetzt
+debug_in_event_time = 0      # Zeitpunkt des letzten Debug-Input-Interrupts (fuer Debounce)
+debug_in_active = False      # True = Debug-Input aktiv
+debug_in_pin = None          # Pin Objekt, wird in init_hardware() angelegt
+
 poti_adc = None          # ADC Objekt, wird in init_hardware() angelegt
 bright_percent = 80      # aktuell gueltiger "bright"-Wert aus dem Poti (mit Hysterese)
 
@@ -98,7 +108,7 @@ host_connected = False   # True ab erster Nachricht vom Pi4
 
 def init_hardware():
     global uart, i2c, pwm_main, pwm_logo, hook_pin, hook_active
-    global poti_adc, bright_percent
+    global poti_adc, bright_percent, debug_in_pin, debug_in_active
 
     # UART zum Pi4 (rxbuf: genug Platz fuer eine volle JSON-Zeile)
     uart = UART(UART_ID, baudrate=UART_BAUD, tx=UART_TX_PIN, rx=UART_RX_PIN, rxbuf=256)
@@ -124,6 +134,11 @@ def init_hardware():
 
     # Startzustand einlesen
     hook_active = is_hook_active_now()
+
+    # 2. Digital Input (Debug), gleiche Logik wie Hook
+    debug_in_pin = Pin(DEBUG_IN_PIN, Pin.IN, Pin.PULL_UP)
+    debug_in_pin.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=debug_in_interrupt)
+    debug_in_active = is_debug_in_active_now()
 
     # Helligkeits-Poti
     poti_adc = ADC(POTI_PIN)
@@ -214,6 +229,38 @@ def is_hook_active_now():
     if HOOK_ACTIVE_HIGH:
         return raw == 1
     return raw == 0
+
+# --- 2. Digital Input (Debug) ---------------------------------------
+
+def debug_in_interrupt(pin):
+    # Nur Flag + Zeitpunkt merken, alles andere macht der Loop.
+    global debug_in_event_flag, debug_in_event_time
+    debug_in_event_flag = True
+    debug_in_event_time = time.ticks_ms()
+
+def is_debug_in_active_now():
+    # Pinzustand lesen, mit DEBUG_IN_ACTIVE_HIGH umkehrbar
+    raw = debug_in_pin.value()
+    if DEBUG_IN_ACTIVE_HIGH:
+        return raw == 1
+    return raw == 0
+
+def handle_debug_in_event():
+    # Wird im Loop aufgerufen, wenn der Interrupt eine Flanke gemeldet hat.
+    # Debounce wie beim Hook.
+    global debug_in_event_flag, debug_in_active
+
+    if time.ticks_diff(time.ticks_ms(), debug_in_event_time) < DEBUG_IN_DEBOUNCE_MS:
+        return  # Debounce noch nicht um, Flag bleibt gesetzt
+
+    debug_in_event_flag = False
+
+    new_active = is_debug_in_active_now()
+    if new_active == debug_in_active:
+        return  # nur Prellen, keine echte Aenderung
+
+    debug_in_active = new_active
+    send_json({"event": "debug", "state": "active" if debug_in_active else "inactive"})
 
 # --- Startphase: warten auf den Pi4 ------------------------------
 
@@ -462,6 +509,9 @@ def loop():
 
     if hook_event_flag:
         handle_hook_event()
+
+    if debug_in_event_flag:
+        handle_debug_in_event()
 
 # --- Programmstart ---------------------------------------------------
 
