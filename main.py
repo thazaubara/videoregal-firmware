@@ -57,20 +57,24 @@ DEBUG_IN_DEBOUNCE_MS = 30
 POTI_PIN = 27              # GP27 (ADC)
 POTI_HYSTERESIS_PERCENT = 5
 
-# Akku (V-Mount 4S, 10.0 - 16.8 V)
+# Temperatur
+TEMP_ADC_ID = 4  # Interner Temperatursensor des RP2040
+
+# Akku (V-Mount 4S): 16.3 V = 100 %, 12.8 V = 20 % (kritisch),
+# 12.0 V = 10 %, 11.2 V = 0 % (Abschaltung). Dazwischen linear.
 # Lineare LUT: Spannungsschwelle -> Ladezustand in 10%-Schritten
 BAT_LUT = [
-    (16.8, 100),
-    (16.1, 90),
+    (16.3, 100),
+    (15.85, 90),
     (15.4, 80),
-    (14.8, 70),
-    (14.1, 60),
-    (13.4, 50),
-    (12.7, 40),
-    (12.0, 30),
-    (11.4, 20),
-    (10.7, 10),
-    (10.0, 0),
+    (15.0, 70),
+    (14.55, 60),
+    (14.1, 50),
+    (13.7, 40),
+    (13.25, 30),
+    (12.8, 20),
+    (12.0, 10),
+    (11.2, 0),
 ]
 
 # --- Globale Variablen ------------------------------------------
@@ -101,6 +105,7 @@ debug_in_pin = None          # Pin Objekt, wird in init_hardware() angelegt
 
 poti_adc = None          # ADC Objekt, wird in init_hardware() angelegt
 bright_percent = 80      # aktuell gueltiger "bright"-Wert aus dem Poti (mit Hysterese)
+temp_adc = None          # ADC Objekt (interner Temp-Sensor), wird in init_hardware() angelegt
 
 host_connected = False   # True ab erster Nachricht vom Pi4
 
@@ -108,7 +113,7 @@ host_connected = False   # True ab erster Nachricht vom Pi4
 
 def init_hardware():
     global uart, i2c, pwm_main, pwm_logo, hook_pin, hook_active
-    global poti_adc, bright_percent, debug_in_pin, debug_in_active
+    global poti_adc, bright_percent, debug_in_pin, debug_in_active, temp_adc
 
     # UART zum Pi4 (rxbuf: genug Platz fuer eine volle JSON-Zeile)
     uart = UART(UART_ID, baudrate=UART_BAUD, tx=UART_TX_PIN, rx=UART_RX_PIN, rxbuf=256)
@@ -143,6 +148,9 @@ def init_hardware():
     # Helligkeits-Poti
     poti_adc = ADC(POTI_PIN)
     bright_percent = read_poti_percent()  # Startwert einmal ohne Hysterese lesen
+
+    # Interner Temperatursensor
+    temp_adc = ADC(TEMP_ADC_ID)
 
 # --- Helligkeits-Poti -----------------------------------------------
 
@@ -364,15 +372,6 @@ def handle_message(msg):
         # Noch nicht implementierte Befehle: nur Error antworten
         send_json({"status": "error", "cmd": cmd, "data": {"error": "unknown command"}})
 
-def handle_set_display(msg):
-    enabled = msg.get("enabled")
-    if not isinstance(enabled, bool):
-        send_json({"status": "error", "cmd": "set_display",
-                   "data": {"error": "missing or invalid 'enabled'"}})
-        return
-    set_display(enabled)
-    send_json({"status": "ok", "cmd": "set_display", "data": {"enabled": display_enabled}})
-
 def handle_set_led(msg):
     fade_ms = msg.get("fade", FADE_DEFAULT_MS)  # optional, Default aus Config
     result = {}
@@ -470,12 +469,18 @@ def get_battery_percent(volts):
     for threshold, percent in BAT_LUT:
         if volts >= threshold:
             return percent
-    return 0  # unter 10.0 V -> leer
+    return 0  # unter 12.0 V -> 0 % (Abschaltung bei 11.2 V)
+
+def read_cpu_temp():
+    # Interner Temperatursensor des RP2040 (ADC Kanal 4)
+    voltage = temp_adc.read_u16() * 3.3 / 65535
+    return 27 - (voltage - 0.706) / 0.001721
 
 # --- Telemetrie ---------------------------------------------------
 
 def get_telemetry_response():
-    # Liest die 3 Power Rails. temp (Sensor) kommt spaeter.
+    # Liest die 3 Power Rails, Akku, Temperaturen, Poti-Wert und
+    # Digital-Input-Zustaende und baut die Antwort-Nachricht.
     raw_v, raw_c, raw_p = read_ina219(INA_ADDR_RAW)
     v12_v, v12_c, v12_p = read_ina219(INA_ADDR_12V)
     v5_v, v5_c, v5_p = read_ina219(INA_ADDR_5V)
@@ -490,7 +495,9 @@ def get_telemetry_response():
                 "5v1": {"v": round(v5_v, 2), "c": round(v5_c), "p": round(v5_p)},
             },
             "bat": get_battery_percent(raw_v),
-            "temp": 0.0,
+            "temp": {"case": None, "cpu": round(read_cpu_temp(), 1)},  # case = Gehaeuse, folgt
+            "poti": {"bright": round(bright_percent, 1)},
+            "digital_in": {"hook": hook_active, "debug": debug_in_active},
         },
     }
 
@@ -498,6 +505,7 @@ def get_telemetry_response():
 
 def setup():
     init_hardware()
+    print(get_telemetry_response())  # einmal lesen, damit die INA219 Sensoren initialisiert werden
 
 def loop():
     msg = read_message()

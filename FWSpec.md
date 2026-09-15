@@ -1,4 +1,4 @@
-## FW Spec (September 9, 2026, Rev 3)
+## FW Spec (September 15, 2026, Rev 4)
 
 Die Firmware läuft auf einem Raspberry Pi Pico (RP2040), ist in MicroPython geschrieben und kommuniziert über UART (JSON, 115200 Baud) mit einem Raspberry Pi 4, der die übergeordnete Logik steuert. 
 
@@ -34,6 +34,8 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
     - f=40 kHz
 - HOOK INPUT
     - Digital In Pin GP2
+- DEBUG INPUT
+    - Digital In Pin GP3
 - BRIGHTNESS POTI
     - Analog In Pin GP27
 
@@ -57,7 +59,7 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         ```json
         {
         "status": "ok", 
-        "cmd": "set_led,
+        "cmd": "set_led",
         "data": {
         	"main": 80,
         	"logo": 20
@@ -66,7 +68,7 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         ```
         
     
-- Get Telemetry Info
+- Get Telemetry Info (Einheiten: v = Volt, c = mA, p = mW)
     - Pi4 → Pico:
       
         ```json
@@ -86,7 +88,9 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         		"5v1": {"v": 5.09, "c": 16, "p": 93}
         		},
         	"bat": 80,
-        	"temp": 42.5
+        	"temp": {"case": null, "cpu": 41.2},
+        	"poti": {"bright": 80.0},
+        	"digital_in": {"hook": true, "debug": false}
         	}
         }\n
         ```
@@ -97,6 +101,14 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
     {"event": "hook", "state": "active"}\n
     ```
     
+    - Asynchrones Event!
+
+- Push Message (Debug Input)
+
+    ```json
+    {"event": "debug", "state": "active"}\
+    ```
+
     - Asynchrones Event!
 
 - Push Message (Boot)
@@ -112,6 +124,10 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
 
 - Power Monitoring:
     - Wenn Nachricht kommt, lies sensoren aus und antworte.
+    - temp enthaelt mehrere Werte: cpu = CPU-Temperatur des Pico,
+      case = Gehaeusetemperatur (wird noch implementiert, aktuell null).
+    - Telemetry enthaelt zusaetzlich den aktuellen Poti-Wert ("bright")
+      und die Zustaende der Digital-Inputs (hook, debug).
 - Hook recording enable
     - Hook active: Hörer abgehoben. Hook Inactive: hörer aufgelegt.
     - Wenn Hook Flanke sich ändert, dann schick die Async Message an den Pi4.
@@ -120,6 +136,9 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
     - Wenn sich flanke ändert, dann setze die leds gleich auf den passenden wert.
         - Hook active: Main LED “bright”, Logo LED “dim”
         - Hook inactive: Main LED “dim”, Logo LED “bright”
+- Debug Input (GP3):
+    - Gleiche Flanken-/Debounce-Logik wie Hook (30 ms, Logik umkehrbar).
+    - Sendet bei Flankenwechsel das async Event "debug".
 - LED switching
     - PWM Frequenz fix. Helligkeit über Duty Cycle.
     - Interne Keywords "bright" und "dim". für jede LED.
@@ -131,7 +150,9 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
           mit kurzem Fade (100ms). LEDs mit festem Wert oder "dim"
           folgen dem Poti nicht.
 - Battery Percentage Track in Firmware based on voltage.
-    - Lineare LUT in 10%-Schritten, Range 10.0 V (0%) bis 16.8 V (100%).
+    - Lineare LUT in 10%-Schritten. Ankerpunkte: 16.3 V = 100%,
+      12.8 V = 20% (kritisch), 12.0 V = 10%, 11.2 V = 0% (Abschaltung).
+      Dazwischen linear, Schwellen auf 0.05 V gerundet.
       Rückgabewert ist die Bracket-Untergrenze (0, 10, 20, ... 100).
 
 **FW Architecture & Mode of Operations**
