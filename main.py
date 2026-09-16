@@ -4,7 +4,7 @@
 # Kommunikation mit dem Pi4 ueber UART (JSON, 115200 Baud)
 # Siehe FWSpec.md
 # =============================================================
-
+import gc
 # --- Imports -----------------------------------------------------
 
 import time
@@ -359,7 +359,20 @@ def read_message():
         return None
 
 def send_json(obj):
-    uart.write((json.dumps(obj) + "\n").encode())
+    # uart.write() darf laut MicroPython weniger Bytes schreiben als
+    # uebergeben (Rueckgabewert = Anzahl geschriebener Bytes). Eine
+    # einfache write()-Zeile hat deshalb hier schon still Bytes verloren
+    # (Pi4 erhielt truncierte JSONs). Diese Schleife garantiert, dass
+    # der komplette Payload rausgeht, egal ob die Ursache FIFO-Stau oder
+    # Heap ist. gc.collect() raeumt den String-Heap danach auf.
+    payload = json.dumps(obj).encode() + b"\n"
+    while payload:
+        n = uart.write(payload)
+        if n is None or n == 0:
+            time.sleep_us(100)
+            continue
+        payload = payload[n:]
+    gc.collect()
 
 def handle_message(msg):
     cmd = msg.get("cmd", "")
