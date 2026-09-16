@@ -90,7 +90,8 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         	"bat": 80,
         	"temp": {"case": null, "cpu": 41.2},
         	"poti": {"bright": 80.0},
-        	"digital_in": {"hook": true, "debug": false}
+	"leds": {"main": 80.0, "logo": 5.0},
+        	"digital_in": {"hook": 1, "debug": 0}
         	}
         }\n
         ```
@@ -126,8 +127,10 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
     - Wenn Nachricht kommt, lies sensoren aus und antworte.
     - temp enthaelt mehrere Werte: cpu = CPU-Temperatur des Pico,
       case = Gehaeusetemperatur (wird noch implementiert, aktuell null).
-    - Telemetry enthaelt zusaetzlich den aktuellen Poti-Wert ("bright")
-      und die Zustaende der Digital-Inputs (hook, debug).
+    - Telemetry enthaelt zusaetzlich den aktuellen Poti-Wert ("bright"),
+      die aktuellen LED-Helligkeiten in Prozent ("leds", main/logo,
+      inkl. laufender Fades) und die Zustaende der Digital-Inputs (hook, debug,
+      als 1/0 statt true/false, fuer den Mimir Exporter).
 - Hook recording enable
     - Hook active: Hörer abgehoben. Hook Inactive: hörer aufgelegt.
     - Wenn Hook Flanke sich ändert, dann schick die Async Message an den Pi4.

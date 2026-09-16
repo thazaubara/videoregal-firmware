@@ -537,12 +537,16 @@ def get_telemetry_response():
                 "case": None, # case = Gehaeuse, folgt
                 "pico": round(read_cpu_temp(), 1)
             },  
+            "leds": {
+                "main": round(led_state["main"]["current"], 1),
+                "logo": round(led_state["logo"]["current"], 1),
+            },
             "analog_in": 
                 {"brightness": round(bright_percent, 1)
             },
-            "digital_in": 
-                {"hook": hook_active, 
-                 "debug": debug_in_active
+            "digital_in":
+                {"hook": 1 if hook_active else 0,
+                 "debug": 1 if debug_in_active else 0
             },
         },
     }
