@@ -533,9 +533,17 @@ def get_telemetry_response():
                 "5v1": {"v": round(v5_v, 2), "c": round(v5_c), "p": round(v5_p)},
             },
             "bat": get_battery_percent(raw_v),
-            "temp": {"case": None, "cpu": round(read_cpu_temp(), 1)},  # case = Gehaeuse, folgt
-            "poti": {"bright": round(bright_percent, 1)},
-            "digital_in": {"hook": hook_active, "debug": debug_in_active},
+            "temp": {
+                "case": None, # case = Gehaeuse, folgt
+                "pico": round(read_cpu_temp(), 1)
+            },  
+            "analog_in": 
+                {"brightness": round(bright_percent, 1)
+            },
+            "digital_in": 
+                {"hook": hook_active, 
+                 "debug": debug_in_active
+            },
         },
     }
 
