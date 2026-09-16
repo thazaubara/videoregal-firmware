@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+			"micropico.syncFolder": "",
+  			"micropico.softResetAfterUpload": true,
+  			"micropico.syncFileTypes": ["py"]
+	}
+}

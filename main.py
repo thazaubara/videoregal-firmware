@@ -4,9 +4,10 @@
 # Kommunikation mit dem Pi4 ueber UART (JSON, 115200 Baud)
 # Siehe FWSpec.md
 # =============================================================
-import gc
+
 # --- Imports -----------------------------------------------------
 
+import gc
 import time
 import math
 import json
@@ -21,6 +22,7 @@ UART_ID = 0
 UART_BAUD = 115200
 UART_TX_PIN = 0    # GP0
 UART_RX_PIN = 1    # GP1
+SEND_TIMEOUT_MS = 200  # Notausstieg, falls der UART dauerhaft blockiert
 
 # I2C fuer die INA219 Sensoren
 I2C_SDA_PIN = 4    # GP4
@@ -323,7 +325,15 @@ def read_message():
     if n == 0:
         return None
 
-    data = uart.read(n).decode()
+    try:
+        data = uart.read(n).decode()
+    except ValueError:
+        # Binaermuell auf der Leitung (z.B. waehrend der Pi4 bootet):
+        # Puffer verwerfen, statt die Firmware abzustuerzen
+        uart_buffer = ""
+        if DEBUG:
+            print("UART: Dekodierfehler, Puffer verworfen")
+        return None
 
     if DEBUG:
         print("UART roh empfangen:", repr(data))
@@ -355,23 +365,32 @@ def read_message():
         return json.loads(line)
     except ValueError:
         if DEBUG:
-            print("UART: ungültiges JSON:", line)
+            print("UART: ungueltiges JSON:", line)
         return None
 
 def send_json(obj):
     # uart.write() darf laut MicroPython weniger Bytes schreiben als
     # uebergeben (Rueckgabewert = Anzahl geschriebener Bytes). Eine
     # einfache write()-Zeile hat deshalb hier schon still Bytes verloren
-    # (Pi4 erhielt truncierte JSONs). Diese Schleife garantiert, dass
-    # der komplette Payload rausgeht, egal ob die Ursache FIFO-Stau oder
-    # Heap ist. gc.collect() raeumt den String-Heap danach auf.
+    # (Pi4 erhielt truncierte JSONs). Diese Schleife schickt den Rest
+    # nach, bis der komplette Payload draussen ist. Der Timeout
+    # verhindert, dass die Firmware bei blockiertem UART stecken bleibt.
+    # gc.collect() raeumt den String-Heap danach auf.
     payload = json.dumps(obj).encode() + b"\n"
+    deadline = time.ticks_add(time.ticks_ms(), SEND_TIMEOUT_MS)
     while payload:
         n = uart.write(payload)
-        if n is None or n == 0:
+        if n:
+            payload = payload[n:]
+        elif time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+            # UART haengt dauerhaft (z.B. Hardware-Problem): abbrechen,
+            # damit die Firmware nicht in dieser Schleife stecken bleibt
+            if DEBUG:
+                print("UART: Senden blockiert, Rest verworfen")
+            break
+        else:
+            # TX-FIFO voll: kurz warten und den Rest nachschicken
             time.sleep_us(100)
-            continue
-        payload = payload[n:]
     gc.collect()
 
 def handle_message(msg):
@@ -459,9 +478,15 @@ def to_signed16(value):
     return value
 
 def init_ina219(addr):
-    # Konfiguration + Kalibrierung schreiben
-    i2c_write_reg(addr, INA_REG_CONFIG, INA_CONFIG)
-    i2c_write_reg(addr, INA_REG_CAL, INA_CALIBRATION)
+    # Konfiguration + Kalibrierung schreiben.
+    # Tolerant: Sensor nicht da -> nur Debug-Meldung, kein Crash,
+    # damit der Pico immer bootet und das Boot-Event rausgeht.
+    try:
+        i2c_write_reg(addr, INA_REG_CONFIG, INA_CONFIG)
+        i2c_write_reg(addr, INA_REG_CAL, INA_CALIBRATION)
+    except OSError:
+        if DEBUG:
+            print("INA219", hex(addr), "nicht erreichbar")
 
 def read_ina219(addr):
     # Liest Busspannung (V), Strom (mA) und Leistung (mW) eines INA219.
