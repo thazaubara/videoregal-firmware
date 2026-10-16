@@ -47,7 +47,11 @@ DEBUG = True  # Debug-Ausgaben ueber USB print() einschalten
 # USB-Hosts (REPL) passieren, werden vom RP2040/RP2350 verworfen — der
 # Heartbeat in wait_for_host() sorgt dafuer, dass man nach dem Verbinden
 # trotzdem lebt-der-Pico-Ausgaben sieht.
-print("=== main.py Boot ===")
+# Firmware-Versionsnummer. Wird beim Start ausgegeben und in der
+# Telemetrie mitgeliefert (Pi-App kann die Firmware-Version anzeigen).
+FIRMWARE_VERSION = "2.1.1"
+
+print("=== main.py Boot === Firmware", FIRMWARE_VERSION)
 
 # UART zum Pi4
 UART_ID = 0
@@ -734,6 +738,7 @@ def get_telemetry_response():
     return {
         "status": "ok",
         "cmd": "get_telemetry",
+        "firmware": FIRMWARE_VERSION,
         "data": {
             "rails": {
                 # Akku: c < 0 = Laden, c > 0 = Entladen (Shunt-Richtung am
