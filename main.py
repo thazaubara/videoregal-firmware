@@ -43,6 +43,12 @@ from machine import Pin, PWM, UART, I2C, ADC
 
 DEBUG = True  # Debug-Ausgaben ueber USB print() einschalten
 
+# Boot-Marker ganz am Anfang. WICHTIG: Prints, die vor dem Verbinden des
+# USB-Hosts (REPL) passieren, werden vom RP2040/RP2350 verworfen — der
+# Heartbeat in wait_for_host() sorgt dafuer, dass man nach dem Verbinden
+# trotzdem lebt-der-Pico-Ausgaben sieht.
+print("=== main.py Boot ===")
+
 # UART zum Pi4
 UART_ID = 0
 UART_BAUD = 115200
@@ -70,11 +76,106 @@ BOARD_REV = "2.0"
 if BOARD_REV == "2.0":
     LED_MAIN_PIN = 15  # GP15
     LED_LOGO_PIN = 14  # GP14
-    WS2812_PIN = 16    # GP16: WS2812-Status-LED, Firmware haelt den Pin low
+    WS2812_PIN = 16    # GP16: WS2812-Status-LED (Firmware-Status)
 else:
     LED_MAIN_PIN = 16  # GP16
     LED_LOGO_PIN = 15  # GP15
     WS2812_PIN = None
+
+# Status-Farben der WS2812 (Halbbrightness, damit es nicht blendet)
+STATUS_RED = (128, 0, 0)     # not ready / Fehler
+STATUS_YELLOW = (128, 96, 0) # wartet auf Host
+STATUS_GREEN = (0, 128, 0)   # aktiv (Host verbunden)
+
+# Kanalreihenfolge der LED. Das neopixel-Modul schreibt standardmaessig
+# GRB (WS2812-Datenblatt). Zeigt die LED die falsche Farbe (z. B. GRUEN
+# erscheint als ROT), ist die Verdrahtung/Variante RGB — dann hier
+# "RGB" eintragen.
+WS2812_ORDER = "RGB"
+
+_ws2812_np = None  # gecachtes NeoPixel-Objekt (lazy in set_status_led)
+_last_status_color = None  # zuletzt gesetzter Status (fuer RX-Flash-Restore)
+
+# RX-Diagnostik: blaues Kurzblien, sobald beliebige Bytes am UART ankommen
+RX_FLASH_MS = 300
+_rx_flash_until = None
+
+# Soft-Fehler (z. B. ungueltiger Befehl): kurz gelb zeigen, dann im
+# Control-Loop zurueck auf gruen. 0 ms = nur bis zur naechsten Loop-Iteration.
+STATUS_ERROR_HOLD_MS = 200
+_status_yellow_until = None  # ticks_ms-Deadline oder None
+
+
+def signal_soft_error():
+    # Nicht-kritischer Fehler: kurz gelb, danach wieder gruen (der Loop
+    # schaltet zurueck, sobald die Deadline abgelaufen ist).
+    global _status_yellow_until
+    set_status_led(STATUS_YELLOW)
+    _status_yellow_until = time.ticks_add(time.ticks_ms(), STATUS_ERROR_HOLD_MS)
+
+
+def rx_flash():
+    # Diagnostik: kurzes blaues Bliken, sobald beliebige Bytes am UART
+    # ankommen (auch Muell). Zeigt ohne USB-REPL, ob RX physisch ankommt.
+    global _rx_flash_until
+    if WS2812_PIN is None:
+        return
+    try:
+        global _ws2812_np
+        if _ws2812_np is None:
+            from neopixel import NeoPixel
+            _ws2812_np = NeoPixel(Pin(WS2812_PIN, Pin.OUT, value=0), 1)
+        if WS2812_ORDER == "RGB":
+            # blau bleibt blau (nur R/G werden getauscht, B bleibt B)
+            _ws2812_np[0] = (0, 0, 128)
+        else:
+            _ws2812_np[0] = (0, 0, 128)
+        _ws2812_np.write()
+        _rx_flash_until = time.ticks_add(time.ticks_ms(), RX_FLASH_MS)
+    except Exception as e:
+        if DEBUG:
+            print("RX-Flash fehlgeschlagen:", e)
+
+
+def update_status_led():
+    # Teil des Control-Loops: RX-Flash ausblenden und Soft-Fehler
+    # (gelb) zurueck auf gruen schalten.
+    global _status_yellow_until, _rx_flash_until
+    if _rx_flash_until is not None:
+        if time.ticks_diff(time.ticks_ms(), _rx_flash_until) >= 0:
+            _rx_flash_until = None
+            if _last_status_color is not None:
+                set_status_led(_last_status_color)
+    if _status_yellow_until is not None:
+        if time.ticks_diff(time.ticks_ms(), _status_yellow_until) >= 0:
+            _status_yellow_until = None
+            if host_connected:
+                set_status_led(STATUS_GREEN)
+
+
+def set_status_led(color):
+    # Setzt die WS2812-Status-LED (nur Rev 2.0). Ein gueltiger 24-Bit-
+    # Rahmen ersetzt auch eine vorher gelatchte Farbe (z. B. weiss nach
+    # Soft-Boot). Fehler duerfen den Betrieb niemals blockieren.
+    global _ws2812_np
+    if WS2812_PIN is None:
+        return
+    try:
+        if _ws2812_np is None:
+            from neopixel import NeoPixel
+            _ws2812_np = NeoPixel(Pin(WS2812_PIN, Pin.OUT, value=0), 1)
+        if WS2812_ORDER == "RGB":
+            # RGB-Variante: R und G tauschen, damit das neopixel-Modul
+            # (GRB-Buffer) physikalisch R/G/B an die LED liefert.
+            color = (color[1], color[0], color[2])
+        _ws2812_np[0] = color
+        _ws2812_np.write()
+        _last_status_color = color
+        if DEBUG:
+            print("Status-LED:", color)
+    except Exception as e:
+        if DEBUG:
+            print("Status-LED fehlgeschlagen:", e)
 PWM_FREQ_HZ = 40000
 DIM_PERCENT = 5         # "dim" Helligkeit in %
 FADE_DEFAULT_MS = 700   # Standard-Fadedauer
@@ -174,22 +275,10 @@ def init_hardware():
     init_ina219(INA_ADDR_5V)
     init_ina219(INA_ADDR_BAT)
 
-    # WS2812 (nur Rev 2.0, GP16): Nach einem Soft-Boot kann die WS2812 in
-    # der Float-Phase Stuerbits gelatcht haben (z. B. weiss). DIN auf Low
-    # allein loescht die Farbe nicht — dazu muss ein Schwarzbild (24
-    # Null-Bits + Reset-Latch) gesendet werden.
-    if WS2812_PIN is not None:
-        ws_pin = Pin(WS2812_PIN, Pin.OUT, value=0)
-        try:
-            from neopixel import NeoPixel
-            np = NeoPixel(ws_pin, 1)
-            np[0] = (0, 0, 0)
-            np.write()  # 24 Null-Bits + Latch -> LED dunkel
-        except ImportError:
-            # Fallback: 24 Null-Bits per machine.bitstream (WS2812-Timing in ns:
-            # 1-Bit = high T1/low T2, 0-Bit = high T3/low T2)
-            from machine import bitstream
-            bitstream(ws_pin, 0, (700, 600, 300), b"\x00\x00\x00")
+    # WS2812 (nur Rev 2.0, GP16): Die Status-LED wird von set_status_led()
+    # verwaltet — setup() setzt sie noch VOR init_hardware() auf rot.
+    # Ein gueltiger 24-Bit-Rahmen ueberschreibt damit auch eine nach einem
+    # Soft-Boot evtl. gelatchte weisse Farbe.
 
     # LEDs als PWM konfigurieren
     # RP2350: GP16 -> Slice 8/Ch0, GP15 -> Slice 7/Ch1 (kein geteilter Slice,
@@ -367,10 +456,13 @@ def wait_for_host():
 
     # Test: Lebenszeichen an den Pi senden (prueft TX-Richtung)
     send_json({"event": "boot"})
+    set_status_led(STATUS_YELLOW)  # Status: wartet auf Host
 
     BREATH_PERIOD_MS = int(1000 / BREATH_FREQ_HZ)
     BREATH_MID = (BREATH_MAX_PERCENT + BREATH_MIN_PERCENT) / 2
     BREATH_AMP = (BREATH_MAX_PERCENT - BREATH_MIN_PERCENT) / 2
+
+    last_heartbeat = time.ticks_ms()
 
     while True:
         t = time.ticks_ms() % BREATH_PERIOD_MS
@@ -390,14 +482,22 @@ def wait_for_host():
         set_led_percent(pwm_logo, percent)
 
         # Erste Nachricht vom Pi4: uebergehen in den normalen Betrieb
+        update_status_led()  # RX-Flash zuruecksetzen, falls geblitzt wurde
         msg = read_message()
         if msg is not None:
             host_connected = True
+            set_status_led(STATUS_GREEN)  # Status: aktiv (Host verbunden)
             handle_message(msg)  # direkt beantworten (z.B. get_telemetry)
             apply_hook_leds()    # LEDs aus der Atem-Phase in Hook-Grundstellung
             break
 
         time.sleep_ms(20)
+
+        # Heartbeat: sichtbare Lebenszeichen, sobald die REPL verbunden ist
+        # (Prints vor dem Verbinden werden vom USB-Stack verworfen).
+        if DEBUG and time.ticks_diff(time.ticks_ms(), last_heartbeat) >= 1000:
+            last_heartbeat = time.ticks_ms()
+            print("wait_for_host: warte auf Pi4 ...")
 
 # --- UART Nachrichten --------------------------------------------
 
@@ -409,6 +509,8 @@ def read_message():
     n = uart.any()
     if n == 0:
         return None
+
+    rx_flash()  # Diagnostik: blaues Bliken bei RX-Aktivität
 
     try:
         data = uart.read(n).decode()
@@ -470,6 +572,7 @@ def send_json(obj):
         elif time.ticks_diff(deadline, time.ticks_ms()) <= 0:
             # UART haengt dauerhaft (z.B. Hardware-Problem): abbrechen,
             # damit die Firmware nicht in dieser Schleife stecken bleibt
+            set_status_led(STATUS_RED)  # Status: Fehler (UART blockiert)
             if DEBUG:
                 print("UART: Senden blockiert, Rest verworfen")
             break
@@ -486,7 +589,8 @@ def handle_message(msg):
     elif cmd == "get_telemetry":
         send_json(get_telemetry_response())
     else:
-        # Noch nicht implementierte Befehle: nur Error antworten
+        # Noch nicht implementierte Befehle: Error antworten + kurz gelb
+        signal_soft_error()
         send_json({"status": "error", "cmd": cmd, "data": {"error": "unknown command"}})
 
 def handle_set_led(msg):
@@ -498,6 +602,7 @@ def handle_set_led(msg):
             continue
         percent, follow_poti = resolve_led_value(msg[name])
         if percent is None:
+            signal_soft_error()  # nicht-kritisch: kurz gelb, dann wieder gruen
             send_json({"status": "error", "cmd": "set_led",
                        "data": {"error": "invalid value for '" + name + "'"}})
             return
@@ -650,6 +755,7 @@ def get_telemetry_response():
 # --- Setup und Loop ------------------------------------------------
 
 def setup():
+    set_status_led(STATUS_RED)  # Status: not ready, bis der Host sich meldet
     init_hardware()
     print(get_telemetry_response())  # einmal lesen, damit die INA219 Sensoren initialisiert werden
 
@@ -658,6 +764,7 @@ def loop():
     if msg is not None:
         handle_message(msg)
 
+    update_status_led()  # Soft-Fehler: gelb -> gruen
     update_bright_percent()
     update_ain2_percent()
     update_led_fades()
@@ -670,8 +777,18 @@ def loop():
 
 # --- Programmstart ---------------------------------------------------
 
-setup()
-wait_for_host()
+try:
+    setup()
+    wait_for_host()
 
-while True:
-    loop()
+    while True:
+        loop()
+except Exception as e:
+    # Crash-Handler: Fehler ueber USB sichtbar machen, statt still zu
+    # sterben (sonst sieht der Pi nur "UART kommt nicht zurueck").
+    set_status_led(STATUS_RED)  # Status: Fehler
+    import sys
+    sys.print_exception(e)
+    print("FIRMWARE-CRASH im Setup/Loop — oben stehenden Traceback pruefen.")
+    while True:
+        time.sleep_ms(1000)
