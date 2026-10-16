@@ -1,8 +1,34 @@
 # =============================================================
-# Videoregal Firmware
-# Raspberry Pi Pico (MicroPython)
+# Videoregal Firmware — Driver Board Rev 2.1
+# Waveshare RP2350-Zero (MicroPython, RP2350)
 # Kommunikation mit dem Pi4 ueber UART (JSON, 115200 Baud)
-# Siehe FWSpec.md
+# Siehe .workflow/spec.md (Firmware Rev 2.1 Pin-Map)
+#
+# Portiert von der RP2040-Pico-Firmware (Rev 2.0):
+#   - Pin-Map: MAIN GP15->GP16, LOGO GP14->GP15, DIN2 GP3 offiziell,
+#     AIN2 GP26 (ADC0) neu, Rest gleich (Hook GP2, Poti GP27,
+#     I2C GP4/GP5, UART GP0/GP1)
+#   - Protokoll, boot-Event, wait_for_host-Breathing, Hook-Debounce,
+#     set_led/get_telemetry-Verhalten unveraendert
+#   - Neu im Telemetrie-Contract: analog_in.ain2 (additiv);
+#     digital_in.debug bleibt Schluesselname fuer DIN2/GP3
+#     (Protokoll-Kompatibilitaet zur Pi-Haupt-App v2)
+#
+# RP2350-Hinweise (MicroPython):
+#   - machine.Pin/PWM/UART/I2C-APIs sind API-kompatibel zum RP2040.
+#   - ADC-Kanalzuordnung: GP26 -> ADC0, GP27 -> ADC1, GP28 -> ADC2.
+#     machine.ADC(pin) mappt automatisch richtig; der interne
+#     Temperatursensor bleibt Kanal 4 (ADC(4)) — gleich wie RP2040.
+#   - PWM-Slices: RP2350 hat 12 Slices (je 2 Channels), Zuordnung
+#     slice = (pin // 2) % 12, channel = pin % 2.
+#       GP16 (MAIN) -> Slice 8, Channel 0
+#       GP15 (LOGO) -> Slice 7, Channel 1
+#     => keine Slice-Kollision, beide LEDs koennen unabhaengig
+#     gefadet werden. (Auf RP2040 lagen GP14/GP15 gemeinsam auf
+#     Slice 7 — das ist hier historia; GP15/GP16 teilen sich auch
+#     auf dem RP2350 keinen Slice.) pwm_main/pwm_logo bekommen
+#     trotzdem je ein eigenes PWM-Objekt; freq() wird pro Objekt
+#     gesetzt, was fuer beide Slices identisch gilt.
 # =============================================================
 
 # --- Imports -----------------------------------------------------
@@ -31,12 +57,24 @@ I2C_FREQ_HZ = 400000
 INA_ADDR_RAW = 0x40   # RAW Rail (Akku)
 INA_ADDR_12V = 0x41   # 12V Rail
 INA_ADDR_5V = 0x44    # 5V Rail
+INA_ADDR_BAT = 0x45   # BAT Rail (A1=VS+, A0=VS+) — Akku-Strom,
+                      # Vorzeichen: c < 0 = Laden, c > 0 = Entladen
 INA_CONFIG = 0x219F      # 32V Bus, +/-40mV Shunt-Range (4A * 0.01 Ohm), 12-bit, Dauerbetrieb
 INA_CALIBRATION = 32768  # ergibt CurrentLSB = 0.125 mA und PowerLSB = 2.5 mW
 
 # LEDs (PWM, Helligkeit ueber Duty Cycle)
-LED_MAIN_PIN = 15  # GP15
-LED_LOGO_PIN = 14  # GP14
+# Board-Revision: 2.0 = Main GP15 / Logo GP14 / GP16 = WS2812-Status-LED,
+#                 2.1 = Main GP16 / Logo GP15 (kein WS2812)
+BOARD_REV = "2.0"
+
+if BOARD_REV == "2.0":
+    LED_MAIN_PIN = 15  # GP15
+    LED_LOGO_PIN = 14  # GP14
+    WS2812_PIN = 16    # GP16: WS2812-Status-LED, Firmware haelt den Pin low
+else:
+    LED_MAIN_PIN = 16  # GP16
+    LED_LOGO_PIN = 15  # GP15
+    WS2812_PIN = None
 PWM_FREQ_HZ = 40000
 DIM_PERCENT = 5         # "dim" Helligkeit in %
 FADE_DEFAULT_MS = 700   # Standard-Fadedauer
@@ -45,22 +83,26 @@ BREATH_MIN_PERCENT = 1  # Atmen in der Wartephase
 BREATH_MAX_PERCENT = 10
 BREATH_FREQ_HZ = 0.5    # Atemfrequenz in Hz (0.5 = ein Zyklus alle 2 Sekunden)
 
-# Hook (Hoerer)
-HOOK_PIN = 2             # GP2
+# DIN1: Hook (Hoerer)
+HOOK_PIN = 2             # GP2 (unveraendert)
 HOOK_ACTIVE_HIGH = True  # False = Logik umkehren
 HOOK_DEBOUNCE_MS = 30
 
-# 2. Digital Input (Debug)
-DEBUG_IN_PIN = 3           # GP3
-DEBUG_IN_ACTIVE_HIGH = True  # False = Logik umkehren
-DEBUG_IN_DEBOUNCE_MS = 30
+# DIN2: 2. Digital-Input (GP3, war Debug-Input, jetzt offizieller Input)
+DIN2_PIN = 3              # GP3
+DIN2_ACTIVE_HIGH = True   # False = Logik umkehren
+DIN2_DEBOUNCE_MS = 30
 
-# Helligkeits-Poti
-POTI_PIN = 27              # GP27 (ADC)
+# AIN1: Helligkeits-Poti (unveraendert)
+POTI_PIN = 27              # GP27 (ADC1)
 POTI_HYSTERESIS_PERCENT = 5
 
+# AIN2: 2. Analog-Input (NEU, GP26 = ADC0)
+AIN2_PIN = 26               # GP26 (ADC0)
+AIN2_HYSTERESIS_PERCENT = 5
+
 # Temperatur
-TEMP_ADC_ID = 4  # Interner Temperatursensor des RP2040
+TEMP_ADC_ID = 4  # Interner Temperatursensor des RP2350 (Kanal 4, wie RP2040)
 
 # Akku (V-Mount 4S): 16.3 V = 100 %, 12.8 V = 20 % (kritisch),
 # 12.0 V = 10 %, 11.2 V = 0 % (Abschaltung). Dazwischen linear.
@@ -100,13 +142,15 @@ hook_event_time = 0      # Zeitpunkt des letzten Hook-Interrupts (fuer Debounce)
 hook_active = False      # True = Hoerer abgehoben
 hook_pin = None          # Pin Objekt, wird in init_hardware() angelegt
 
-debug_in_event_flag = False  # wird vom Debug-Input-Interrupt gesetzt
-debug_in_event_time = 0      # Zeitpunkt des letzten Debug-Input-Interrupts (fuer Debounce)
-debug_in_active = False      # True = Debug-Input aktiv
-debug_in_pin = None          # Pin Objekt, wird in init_hardware() angelegt
+din2_event_flag = False  # wird vom DIN2-Interrupt gesetzt
+din2_event_time = 0      # Zeitpunkt des letzten DIN2-Interrupts (fuer Debounce)
+din2_active = False      # True = DIN2 aktiv
+din2_pin = None          # Pin Objekt, wird in init_hardware() angelegt
 
 poti_adc = None          # ADC Objekt, wird in init_hardware() angelegt
 bright_percent = 80      # aktuell gueltiger "bright"-Wert aus dem Poti (mit Hysterese)
+ain2_adc = None          # ADC Objekt fuer AIN2, wird in init_hardware() angelegt
+ain2_percent = 0.0       # zuletzt gueltiger AIN2-Wert in % (mit Hysterese)
 temp_adc = None          # ADC Objekt (interner Temp-Sensor), wird in init_hardware() angelegt
 
 host_connected = False   # True ab erster Nachricht vom Pi4
@@ -115,7 +159,8 @@ host_connected = False   # True ab erster Nachricht vom Pi4
 
 def init_hardware():
     global uart, i2c, pwm_main, pwm_logo, hook_pin, hook_active
-    global poti_adc, bright_percent, debug_in_pin, debug_in_active, temp_adc
+    global poti_adc, bright_percent, din2_pin, din2_active, temp_adc
+    global ain2_adc, ain2_percent
 
     # UART zum Pi4 (rxbuf: genug Platz fuer eine volle JSON-Zeile)
     uart = UART(UART_ID, baudrate=UART_BAUD, tx=UART_TX_PIN, rx=UART_RX_PIN, rxbuf=256)
@@ -127,14 +172,36 @@ def init_hardware():
     init_ina219(INA_ADDR_RAW)
     init_ina219(INA_ADDR_12V)
     init_ina219(INA_ADDR_5V)
+    init_ina219(INA_ADDR_BAT)
+
+    # WS2812 (nur Rev 2.0, GP16): Nach einem Soft-Boot kann die WS2812 in
+    # der Float-Phase Stuerbits gelatcht haben (z. B. weiss). DIN auf Low
+    # allein loescht die Farbe nicht — dazu muss ein Schwarzbild (24
+    # Null-Bits + Reset-Latch) gesendet werden.
+    if WS2812_PIN is not None:
+        ws_pin = Pin(WS2812_PIN, Pin.OUT, value=0)
+        try:
+            from neopixel import NeoPixel
+            np = NeoPixel(ws_pin, 1)
+            np[0] = (0, 0, 0)
+            np.write()  # 24 Null-Bits + Latch -> LED dunkel
+        except ImportError:
+            # Fallback: 24 Null-Bits per machine.bitstream (WS2812-Timing in ns:
+            # 1-Bit = high T1/low T2, 0-Bit = high T3/low T2)
+            from machine import bitstream
+            bitstream(ws_pin, 0, (700, 600, 300), b"\x00\x00\x00")
 
     # LEDs als PWM konfigurieren
+    # RP2350: GP16 -> Slice 8/Ch0, GP15 -> Slice 7/Ch1 (kein geteilter Slice,
+    # siehe Kommentar im Dateikopf). Einzelnes PWM-Objekt je LED.
+    # (Rev 2.0: GP15/GP14, GP16 bleibt WS2812-Pin und wird oben auf low
+    # gezogen — dann kann kein PWM-Ausgang mit der WS2812 kollidieren.)
     pwm_main = PWM(Pin(LED_MAIN_PIN))
     pwm_logo = PWM(Pin(LED_LOGO_PIN))
     pwm_main.freq(PWM_FREQ_HZ)
     pwm_logo.freq(PWM_FREQ_HZ)
 
-    # Hook (Hoerer). Pull-up: Ruhe-Opfer liegt an, abgehoben = high.
+    # DIN1: Hook (Hoerer). Pull-up: Ruhe-Kontakt liegt an, abgehoben = high.
     # Bei anderer Verdrahtung HOOK_ACTIVE_HIGH auf False setzen.
     hook_pin = Pin(HOOK_PIN, Pin.IN, Pin.PULL_UP)
     hook_pin.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=hook_interrupt)
@@ -142,19 +209,36 @@ def init_hardware():
     # Startzustand einlesen
     hook_active = is_hook_active_now()
 
-    # 2. Digital Input (Debug), gleiche Logik wie Hook
-    debug_in_pin = Pin(DEBUG_IN_PIN, Pin.IN, Pin.PULL_UP)
-    debug_in_pin.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=debug_in_interrupt)
-    debug_in_active = is_debug_in_active_now()
+    # DIN2: 2. Digital-Input, gleiche Logik wie Hook
+    din2_pin = Pin(DIN2_PIN, Pin.IN, Pin.PULL_UP)
+    din2_pin.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=din2_interrupt)
+    din2_active = is_din2_active_now()
 
-    # Helligkeits-Poti
+    # AIN1: Helligkeits-Poti (GP27 -> ADC1, machine.ADC mappt automatisch)
     poti_adc = ADC(POTI_PIN)
     bright_percent = read_poti_percent()  # Startwert einmal ohne Hysterese lesen
 
-    # Interner Temperatursensor
+    # AIN2: 2. Analog-Input (GP26 -> ADC0, machine.ADC mappt automatisch)
+    ain2_adc = ADC(AIN2_PIN)
+    ain2_percent = read_ain2_percent()  # Startwert einmal ohne Hysterese lesen
+
+    # Interner Temperatursensor (RP2350: ADC-Kanal 4)
     temp_adc = ADC(TEMP_ADC_ID)
 
-# --- Helligkeits-Poti -----------------------------------------------
+# --- AIN2 (2. Analog-Input) ----------------------------------------
+
+def read_ain2_percent():
+    # AIN2 an GP26 auslesen, 0-65535 -> 0-100 %
+    return ain2_adc.read_u16() * 100 / 65535
+
+def update_ain2_percent():
+    # Hysterese wie beim Poti: ADC-Rauschen soll nicht zapplen.
+    global ain2_percent
+    measured = read_ain2_percent()
+    if abs(measured - ain2_percent) > AIN2_HYSTERESIS_PERCENT:
+        ain2_percent = measured
+
+# --- AIN1: Helligkeits-Poti -----------------------------------------------
 
 def read_poti_percent():
     # Poti an GP27 auslesen, 0-65535 -> DIM_PERCENT bis 100 %
@@ -240,37 +324,38 @@ def is_hook_active_now():
         return raw == 1
     return raw == 0
 
-# --- 2. Digital Input (Debug) ---------------------------------------
+# --- DIN2: 2. Digital-Input ---------------------------------------
 
-def debug_in_interrupt(pin):
+def din2_interrupt(pin):
     # Nur Flag + Zeitpunkt merken, alles andere macht der Loop.
-    global debug_in_event_flag, debug_in_event_time
-    debug_in_event_flag = True
-    debug_in_event_time = time.ticks_ms()
+    global din2_event_flag, din2_event_time
+    din2_event_flag = True
+    din2_event_time = time.ticks_ms()
 
-def is_debug_in_active_now():
-    # Pinzustand lesen, mit DEBUG_IN_ACTIVE_HIGH umkehrbar
-    raw = debug_in_pin.value()
-    if DEBUG_IN_ACTIVE_HIGH:
+def is_din2_active_now():
+    # Pinzustand lesen, mit DIN2_ACTIVE_HIGH umkehrbar
+    raw = din2_pin.value()
+    if DIN2_ACTIVE_HIGH:
         return raw == 1
     return raw == 0
 
-def handle_debug_in_event():
+def handle_din2_event():
     # Wird im Loop aufgerufen, wenn der Interrupt eine Flanke gemeldet hat.
-    # Debounce wie beim Hook.
-    global debug_in_event_flag, debug_in_active
+    # Debounce wie beim Hook. Protokoll-Schluessel bleibt "debug" (GP3 war
+    # der Debug-Input; die Pi-Haupt-App v2 kennt diesen Event-Namen).
+    global din2_event_flag, din2_active
 
-    if time.ticks_diff(time.ticks_ms(), debug_in_event_time) < DEBUG_IN_DEBOUNCE_MS:
+    if time.ticks_diff(time.ticks_ms(), din2_event_time) < DIN2_DEBOUNCE_MS:
         return  # Debounce noch nicht um, Flag bleibt gesetzt
 
-    debug_in_event_flag = False
+    din2_event_flag = False
 
-    new_active = is_debug_in_active_now()
-    if new_active == debug_in_active:
+    new_active = is_din2_active_now()
+    if new_active == din2_active:
         return  # nur Prellen, keine echte Aenderung
 
-    debug_in_active = new_active
-    send_json({"event": "debug", "state": "active" if debug_in_active else "inactive"})
+    din2_active = new_active
+    send_json({"event": "debug", "state": "active" if din2_active else "inactive"})
 
 # --- Startphase: warten auf den Pi4 ------------------------------
 
@@ -421,7 +506,7 @@ def handle_set_led(msg):
 
     send_json({"status": "ok", "cmd": "set_led", "data": result})
 
-# --- Hook (Hoerer) ------------------------------------------------
+# --- DIN1: Hook (Hoerer) -------------------------------------------
 
 def hook_interrupt(pin):
     # Nur Flag + Zeitpunkt merken, alles andere macht der Loop.
@@ -430,7 +515,7 @@ def hook_interrupt(pin):
     hook_event_time = time.ticks_ms()
 
 def handle_hook_event():
-    # Wird im Loop aufgerufen, wenn der Interrupt ein Flanke gemeldet hat.
+    # Wird im Loop aufgerufen, wenn der Interrupt eine Flanke gemeldet hat.
     # Debounce: erst reagieren, wenn seit der letzten Flanke nichts mehr kam.
     global hook_event_flag, hook_active
 
@@ -480,7 +565,7 @@ def to_signed16(value):
 def init_ina219(addr):
     # Konfiguration + Kalibrierung schreiben.
     # Tolerant: Sensor nicht da -> nur Debug-Meldung, kein Crash,
-    # damit der Pico immer bootet und das Boot-Event rausgeht.
+    # damit das Board immer bootet und das Boot-Event rausgeht.
     try:
         i2c_write_reg(addr, INA_REG_CONFIG, INA_CONFIG)
         i2c_write_reg(addr, INA_REG_CAL, INA_CALIBRATION)
@@ -510,43 +595,54 @@ def get_battery_percent(volts):
     return 0  # unter 12.0 V -> 0 % (Abschaltung bei 11.2 V)
 
 def read_cpu_temp():
-    # Interner Temperatursensor des RP2040 (ADC Kanal 4)
+    # Interner Temperatursensor des RP2350 (ADC Kanal 4).
+    # Formel wie beim RP2040 (Vbe 0.706 V bei 27 C, -1.721 mV/C).
+    # Auf dem RP2350 ist die Referenz ebenfalls 3.3 V; falls die
+    # MicroPython-Version des RP2350-Ports machine.temp_raw()/ADC-Temp
+    # anders skaliert, hier nachjustieren (Smoke-Test Punkt 9).
     voltage = temp_adc.read_u16() * 3.3 / 65535
     return 27 - (voltage - 0.706) / 0.001721
 
 # --- Telemetrie ---------------------------------------------------
 
 def get_telemetry_response():
-    # Liest die 3 Power Rails, Akku, Temperaturen, Poti-Wert und
-    # Digital-Input-Zustaende und baut die Antwort-Nachricht.
+    # Liest die 4 Power Rails, Akku, Temperaturen, Poti-Wert und
+    # Digital-/Analog-Input-Zustaende und baut die Antwort-Nachricht.
     raw_v, raw_c, raw_p = read_ina219(INA_ADDR_RAW)
     v12_v, v12_c, v12_p = read_ina219(INA_ADDR_12V)
     v5_v, v5_c, v5_p = read_ina219(INA_ADDR_5V)
+    bat_v, bat_c, bat_p = read_ina219(INA_ADDR_BAT)
 
     return {
         "status": "ok",
         "cmd": "get_telemetry",
         "data": {
             "rails": {
+                # Akku: c < 0 = Laden, c > 0 = Entladen (Shunt-Richtung am
+                # BAT-INA, 0x45). p kann beim Laden negativ sein.
+                "bat": {"v": round(bat_v, 2), "c": round(bat_c), "p": round(bat_p)},
                 "raw": {"v": round(raw_v, 2), "c": round(raw_c), "p": round(raw_p)},
                 "12v": {"v": round(v12_v, 2), "c": round(v12_c), "p": round(v12_p)},
                 "5v1": {"v": round(v5_v, 2), "c": round(v5_c), "p": round(v5_p)},
             },
+            # Ladezustand (%) aus der BAT-LUT — unveraendert wie vorher (RAW).
             "bat": get_battery_percent(raw_v),
             "temp": {
-                "case": None, # case = Gehaeuse, folgt
+                "case": 0, # nicht unterstuetzt (Rev 2.1), konstant 0
                 "pico": round(read_cpu_temp(), 1)
-            },  
+            },
+            # LEDs in Prozent (0-100, mit 1 Nachkommastelle) — matches Pi-App
             "leds": {
                 "main": round(led_state["main"]["current"], 1),
                 "logo": round(led_state["logo"]["current"], 1),
             },
-            "analog_in": 
-                {"brightness": round(bright_percent, 1)
+            "analog_in":
+                {"brightness": round(bright_percent, 1),
+                 "ain2": round(ain2_percent, 1)
             },
             "digital_in":
                 {"hook": 1 if hook_active else 0,
-                 "debug": 1 if debug_in_active else 0
+                 "debug": 1 if din2_active else 0  # DIN2/GP3, Schluessel bleibt "debug"
             },
         },
     }
@@ -563,13 +659,14 @@ def loop():
         handle_message(msg)
 
     update_bright_percent()
+    update_ain2_percent()
     update_led_fades()
 
     if hook_event_flag:
         handle_hook_event()
 
-    if debug_in_event_flag:
-        handle_debug_in_event()
+    if din2_event_flag:
+        handle_din2_event()
 
 # --- Programmstart ---------------------------------------------------
 
