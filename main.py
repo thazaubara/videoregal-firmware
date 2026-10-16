@@ -82,10 +82,13 @@ else:
     LED_LOGO_PIN = 15  # GP15
     WS2812_PIN = None
 
-# Status-Farben der WS2812 (Halbbrightness, damit es nicht blendet)
-STATUS_RED = (128, 0, 0)     # not ready / Fehler
-STATUS_YELLOW = (128, 96, 0) # wartet auf Host
-STATUS_GREEN = (0, 128, 0)   # aktiv (Host verbunden)
+# Status-Farben der WS2812. STATUS_BRIGHT skaliert alle Kanäle — 13 ≈ 10 %
+# von 128 (frueher Halbbrightness). LED soll moeglichst wenig Strom ziehen.
+STATUS_BRIGHT = 13
+STATUS_RED = (STATUS_BRIGHT, 0, 0)     # not ready / Fehler
+STATUS_YELLOW = (STATUS_BRIGHT, 10, 0) # wartet auf Host
+STATUS_GREEN = (0, STATUS_BRIGHT, 0)   # aktiv (Host verbunden)
+STATUS_BLUE = (0, 0, STATUS_BRIGHT)    # gueltige Nachricht empfangen (Kurzblitz)
 
 # Kanalreihenfolge der LED. Das neopixel-Modul schreibt standardmaessig
 # GRB (WS2812-Datenblatt). Zeigt die LED die falsche Farbe (z. B. GRUEN
@@ -94,63 +97,61 @@ STATUS_GREEN = (0, 128, 0)   # aktiv (Host verbunden)
 WS2812_ORDER = "RGB"
 
 _ws2812_np = None  # gecachtes NeoPixel-Objekt (lazy in set_status_led)
-_last_status_color = None  # zuletzt gesetzter Status (fuer RX-Flash-Restore)
 
-# RX-Diagnostik: blaues Kurzblien, sobald beliebige Bytes am UART ankommen
+# Diagnostik:
+#   - Gueltige Nachricht empfangen: kurzer BLAUER Blitz (RX_FLASH_MS),
+#     danach zurueck auf den Status (gruen, bzw. gelb im Wartemodus).
+#     Blinkt nur pro gueltiger Nachricht — Fragmente auf der Leitung
+#     verlaengern die Deadline nicht, die LED bleibt also nicht haengen.
+#   - Ungueltige Nachricht (Binaermuell / kein JSON / kein Objekt): ROT
+#     statt gelb, danach ebenfalls zurueck auf den Status.
 RX_FLASH_MS = 300
 _rx_flash_until = None
 
-# Soft-Fehler (z. B. ungueltiger Befehl): kurz gelb zeigen, dann im
-# Control-Loop zurueck auf gruen. 0 ms = nur bis zur naechsten Loop-Iteration.
+# Soft-Fehler (z. B. ungueltige Nachricht): kurz ROT zeigen, dann im
+# Control-Loop zurueck auf gruen (bzw. gelb, solange nicht ready).
 STATUS_ERROR_HOLD_MS = 200
-_status_yellow_until = None  # ticks_ms-Deadline oder None
+_status_error_until = None  # ticks_ms-Deadline oder None
 
 
 def signal_soft_error():
-    # Nicht-kritischer Fehler: kurz gelb, danach wieder gruen (der Loop
-    # schaltet zurueck, sobald die Deadline abgelaufen ist).
-    global _status_yellow_until
-    set_status_led(STATUS_YELLOW)
-    _status_yellow_until = time.ticks_add(time.ticks_ms(), STATUS_ERROR_HOLD_MS)
+    # Nicht-kritischer Fehler: kurz rot, danach wieder den normalen Status
+    # (gruen wenn ready, sonst gelb — der Loop schaltet zurueck, sobald
+    # die Deadline abgelaufen ist).
+    global _status_error_until
+    set_status_led(STATUS_RED)
+    _status_error_until = time.ticks_add(time.ticks_ms(), STATUS_ERROR_HOLD_MS)
 
 
-def rx_flash():
-    # Diagnostik: kurzes blaues Bliken, sobald beliebige Bytes am UART
-    # ankommen (auch Muell). Zeigt ohne USB-REPL, ob RX physisch ankommt.
+def flash_rx_ok():
+    # Gueltige Nachricht am UART: kurzer blauer Blitz, danach schaltet
+    # update_status_led() zurueck auf den normalen Status.
     global _rx_flash_until
-    if WS2812_PIN is None:
-        return
-    try:
-        global _ws2812_np
-        if _ws2812_np is None:
-            from neopixel import NeoPixel
-            _ws2812_np = NeoPixel(Pin(WS2812_PIN, Pin.OUT, value=0), 1)
-        if WS2812_ORDER == "RGB":
-            # blau bleibt blau (nur R/G werden getauscht, B bleibt B)
-            _ws2812_np[0] = (0, 0, 128)
-        else:
-            _ws2812_np[0] = (0, 0, 128)
-        _ws2812_np.write()
-        _rx_flash_until = time.ticks_add(time.ticks_ms(), RX_FLASH_MS)
-    except Exception as e:
-        if DEBUG:
-            print("RX-Flash fehlgeschlagen:", e)
+    set_status_led(STATUS_BLUE)
+    _rx_flash_until = time.ticks_add(time.ticks_ms(), RX_FLASH_MS)
 
 
 def update_status_led():
-    # Teil des Control-Loops: RX-Flash ausblenden und Soft-Fehler
-    # (gelb) zurueck auf gruen schalten.
-    global _status_yellow_until, _rx_flash_until
+    # Teil des Control-Loops: Blaulicht-RX-Blitz ausblenden und Soft-Fehler
+    # (rot) zurueck auf den normalen Status schalten.
+    global _status_error_until, _rx_flash_until
+    now = time.ticks_ms()
     if _rx_flash_until is not None:
-        if time.ticks_diff(time.ticks_ms(), _rx_flash_until) >= 0:
+        if time.ticks_diff(now, _rx_flash_until) >= 0:
             _rx_flash_until = None
-            if _last_status_color is not None:
-                set_status_led(_last_status_color)
-    if _status_yellow_until is not None:
-        if time.ticks_diff(time.ticks_ms(), _status_yellow_until) >= 0:
-            _status_yellow_until = None
-            if host_connected:
-                set_status_led(STATUS_GREEN)
+            _restore_status()
+    if _status_error_until is not None:
+        if time.ticks_diff(now, _status_error_until) >= 0:
+            _status_error_until = None
+            _restore_status()
+
+
+def _restore_status():
+    # Normaler Status zurueck: gruen wenn ready, sonst gelb (Wartemodus).
+    if host_connected:
+        set_status_led(STATUS_GREEN)
+    else:
+        set_status_led(STATUS_YELLOW)
 
 
 def set_status_led(color):
@@ -170,7 +171,6 @@ def set_status_led(color):
             color = (color[1], color[0], color[2])
         _ws2812_np[0] = color
         _ws2812_np.write()
-        _last_status_color = color
         if DEBUG:
             print("Status-LED:", color)
     except Exception as e:
@@ -482,7 +482,7 @@ def wait_for_host():
         set_led_percent(pwm_logo, percent)
 
         # Erste Nachricht vom Pi4: uebergehen in den normalen Betrieb
-        update_status_led()  # RX-Flash zuruecksetzen, falls geblitzt wurde
+        update_status_led()  # Soft-Fehler-Restore (waere in dieser Phase ohnehin inaktiv)
         msg = read_message()
         if msg is not None:
             host_connected = True
@@ -510,14 +510,13 @@ def read_message():
     if n == 0:
         return None
 
-    rx_flash()  # Diagnostik: blaues Bliken bei RX-Aktivität
-
     try:
         data = uart.read(n).decode()
     except ValueError:
         # Binaermuell auf der Leitung (z.B. waehrend der Pi4 bootet):
         # Puffer verwerfen, statt die Firmware abzustuerzen
         uart_buffer = ""
+        signal_soft_error()  # nicht dekodierbare Nachricht: rot zeigen
         if DEBUG:
             print("UART: Dekodierfehler, Puffer verworfen")
         return None
@@ -530,6 +529,7 @@ def read_message():
     # Schutz: Muell ohne Zeilenende darf den Puffer nicht endlos wachsen lassen
     if len(uart_buffer) > 512:
         uart_buffer = ""
+        signal_soft_error()  # unparsebare Nachricht: rot zeigen
         if DEBUG:
             print("UART: Puffer uebergelaufen, verworfen")
         return None
@@ -549,11 +549,24 @@ def read_message():
         print("UART empfangen:", line)
 
     try:
-        return json.loads(line)
+        parsed = json.loads(line)
     except ValueError:
+        signal_soft_error()  # falsche Nachricht (ungueltiges JSON): rot zeigen
         if DEBUG:
             print("UART: ungueltiges JSON:", line)
         return None
+
+    if not isinstance(parsed, dict):
+        # Gueltiges JSON, aber kein Objekt (z. B. Array): genauso eine
+        # falsche Nachricht — rot zeigen und verwerfen, nicht crashen.
+        signal_soft_error()
+        if DEBUG:
+            print("UART: Nachricht ist kein JSON-Objekt:", line)
+        return None
+
+    # Gueltige Nachricht: kurzer blauer Blitz (Diagnostik).
+    flash_rx_ok()
+    return parsed
 
 def send_json(obj):
     # uart.write() darf laut MicroPython weniger Bytes schreiben als
@@ -602,7 +615,7 @@ def handle_set_led(msg):
             continue
         percent, follow_poti = resolve_led_value(msg[name])
         if percent is None:
-            signal_soft_error()  # nicht-kritisch: kurz gelb, dann wieder gruen
+            signal_soft_error()  # nicht-kritisch: kurz rot, dann wieder gruen
             send_json({"status": "error", "cmd": "set_led",
                        "data": {"error": "invalid value for '" + name + "'"}})
             return
@@ -764,7 +777,7 @@ def loop():
     if msg is not None:
         handle_message(msg)
 
-    update_status_led()  # Soft-Fehler: gelb -> gruen
+    update_status_led()  # Flash/Soft-Fehler zurueck auf normalen Status
     update_bright_percent()
     update_ain2_percent()
     update_led_fades()
