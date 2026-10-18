@@ -50,7 +50,7 @@ DEBUG = True  # Debug-Ausgaben ueber USB print() einschalten
 # trotzdem lebt-der-Pico-Ausgaben sieht.
 # Firmware-Versionsnummer. Wird beim Start ausgegeben und in der
 # Telemetrie mitgeliefert (Pi-App kann die Firmware-Version anzeigen).
-FIRMWARE_VERSION = "2.1.1"
+FIRMWARE_VERSION = "2.1.2"
 
 print("=== main.py Boot === Firmware", FIRMWARE_VERSION)
 
