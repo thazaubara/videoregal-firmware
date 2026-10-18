@@ -83,11 +83,13 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         "cmd": "get_telemetry",
         "data": {
         	"rails": {
+        		"bat": {"v": 14.80, "c": -420, "p": -6210},
         		"raw": {"v": 14.80, "c": 82, "p": 1200},
         		"12v": {"v": 12.12, "c": 60, "p": 727},
         		"5v1": {"v": 5.09, "c": 16, "p": 93}
         		},
         	"bat": 80,
+        	"bat_charging": true,
         	"temp": {"case": null, "cpu": 41.2},
         	"poti": {"bright": 80.0},
 	"leds": {"main": 80.0, "logo": 5.0},
@@ -96,6 +98,12 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         }\n
         ```
     
+      - Vorzeichen an bat (BAT-Rail, INA 0x45): c < 0 = Laden,
+        c > 0 = Entladen. Beim Laden ist auch p negativ (das INA219
+        meldet im Power-Register immer positive Werte; die Firmware
+        uebernimmt das Vorzeichen vom Strom).
+      - bat_charging ist true, solange geladen wird (c < 0),
+        additiv; aeltere Pi-Apps ignorieren den Key.
 - Set Hook Polarity (dauerhaft gespeichert)
     - Pi4 -> Pico:
 

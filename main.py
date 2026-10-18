@@ -13,6 +13,10 @@
 #   - Neu im Telemetrie-Contract: analog_in.ain2 (additiv);
 #     digital_in.debug bleibt Schluesselname fuer DIN2/GP3
 #     (Protokoll-Kompatibilitaet zur Pi-Haupt-App v2)
+#   - Rev 2.1.3: Neu "bat_charging" (bool) im get_telemetry-Contract
+#     (additiv). bat-p bekommt das Vorzeichen von bat-c, weil das
+#     INA219-Power-Register staets positive Werte meldet
+#     (Laden -> c < 0 und p < 0).
 #
 # RP2350-Hinweise (MicroPython):
 #   - machine.Pin/PWM/UART/I2C-APIs sind API-kompatibel zum RP2040.
@@ -50,7 +54,7 @@ DEBUG = True  # Debug-Ausgaben ueber USB print() einschalten
 # trotzdem lebt-der-Pico-Ausgaben sieht.
 # Firmware-Versionsnummer. Wird beim Start ausgegeben und in der
 # Telemetrie mitgeliefert (Pi-App kann die Firmware-Version anzeigen).
-FIRMWARE_VERSION = "2.1.2"
+FIRMWARE_VERSION = "2.1.3"
 
 print("=== main.py Boot === Firmware", FIRMWARE_VERSION)
 
@@ -811,6 +815,16 @@ def get_telemetry_response():
     v5_v, v5_c, v5_p = read_ina219(INA_ADDR_5V)
     bat_v, bat_c, bat_p = read_ina219(INA_ADDR_BAT)
 
+    # Das INA219-Power-Register meldet staets einen positiven Wert,
+    # egal in welche Richtung der Strom fliesst (anders als beim
+    # Current-Register gibt es dort keine Richtungsinformation).
+    # Das Vorzeichen wird daher hier aus dem Strom uebernommen:
+    # c < 0 (Laden) -> p auch negativ, sonst wuerde die Pi-App beim
+    # Laden positive Leistung anzeigen, obwohl Strom zurueck in den
+    # Akku fliesst.
+    if bat_c < 0:
+        bat_p = -bat_p
+
     return {
         "status": "ok",
         "cmd": "get_telemetry",
@@ -826,6 +840,9 @@ def get_telemetry_response():
             },
             # Ladezustand (%) aus der BAT-LUT — unveraendert wie vorher (RAW).
             "bat": get_battery_percent(raw_v),
+            # True, solange Strom in den Akku zurueckfliesst (bat.c < 0).
+            # Additiv; bestaehende Pi-Apps koennen den Key ignorieren.
+            "bat_charging": bat_c < 0,
             "temp": {
                 "case": 0, # nicht unterstuetzt (Rev 2.1), konstant 0
                 "pico": round(read_cpu_temp(), 1)
