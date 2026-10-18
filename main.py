@@ -37,6 +37,7 @@ import gc
 import time
 import math
 import json
+import os
 from machine import Pin, PWM, UART, I2C, ADC
 
 # --- Konfiguration ---------------------------------------------
@@ -189,9 +190,17 @@ BREATH_MAX_PERCENT = 10
 BREATH_FREQ_HZ = 0.5    # Atemfrequenz in Hz (0.5 = ein Zyklus alle 2 Sekunden)
 
 # DIN1: Hook (Hoerer)
+# HOOK_ACTIVE_HIGH ist NUR noch der Default-Wert (erste Box / keine
+# Config-Datei). Die Auswertung laeuft ueber die Laufzeit-Variable
+# hook_active_high (per UART umschaltbar, im Flash gespeichert).
 HOOK_PIN = 2             # GP2 (unveraendert)
-HOOK_ACTIVE_HIGH = True  # False = Logik umkehren
+HOOK_ACTIVE_HIGH = True  # Default-Polaritaet (wie bisher)
 HOOK_DEBOUNCE_MS = 30
+
+# Persistenz-File im Pico-Flash. WICHTIG: RP2040/RP2350-MicroPython
+# mountet das interne Flash am ROOT "/", nicht "/flash" (das ist eine
+# ESP32-Konvention - unter Pico-MicroPython scheitert /flash still).
+HOOK_CONFIG_FILE = "/hook_config.json"
 
 # DIN2: 2. Digital-Input (GP3, war Debug-Input, jetzt offizieller Input)
 DIN2_PIN = 3              # GP3
@@ -245,6 +254,7 @@ led_state = {
 hook_event_flag = False  # wird vom Hook-Interrupt gesetzt
 hook_event_time = 0      # Zeitpunkt des letzten Hook-Interrupts (fuer Debounce)
 hook_active = False      # True = Hoerer abgehoben
+hook_active_high = HOOK_ACTIVE_HIGH  # Laufzeit-Polaritaet, beim Boot aus Flash geladen
 hook_pin = None          # Pin Objekt, wird in init_hardware() angelegt
 
 din2_event_flag = False  # wird vom DIN2-Interrupt gesetzt
@@ -411,9 +421,11 @@ def resolve_led_value(value):
     return None, False
 
 def is_hook_active_now():
-    # Pinzustand lesen, mit HOOK_ACTIVE_HIGH umkehrbar
+    # Pinzustand lesen, mit hook_active_high umkehrbar (Laufzeit-Polaritaet,
+    # per UART umschaltbar und im Flash gespeichert; HOOK_ACTIVE_HIGH ist
+    # nur noch der Code-Default).
     raw = hook_pin.value()
-    if HOOK_ACTIVE_HIGH:
+    if hook_active_high:
         return raw == 1
     return raw == 0
 
@@ -459,7 +471,9 @@ def wait_for_host():
     # bis die erste Nachricht vom Pi4 kommt.
 
     # Test: Lebenszeichen an den Pi senden (prueft TX-Richtung)
-    send_json({"event": "boot"})
+    # hook_active_high im Boot-Event: alte Pi-Apps ignorieren den
+    # zusaetzlichen Key, neue Apps koennen die Polaritaet beim Boot loggen.
+    send_json({"event": "boot", "hook_active_high": hook_active_high})
     set_status_led(STATUS_YELLOW)  # Status: wartet auf Host
 
     BREATH_PERIOD_MS = int(1000 / BREATH_FREQ_HZ)
@@ -605,6 +619,11 @@ def handle_message(msg):
         handle_set_led(msg)
     elif cmd == "get_telemetry":
         send_json(get_telemetry_response())
+    elif cmd == "set_hook_polarity":
+        handle_set_hook_polarity(msg)
+    elif cmd == "get_hook_polarity":
+        send_json({"status": "ok", "cmd": "get_hook_polarity",
+                   "data": {"hook_active_high": hook_active_high}})
     else:
         # Noch nicht implementierte Befehle: Error antworten + kurz gelb
         signal_soft_error()
@@ -662,6 +681,63 @@ def apply_hook_leds():
     else:
         start_fade("main", DIM_PERCENT, FADE_DEFAULT_MS, False)
         start_fade("logo", get_bright_percent(), FADE_DEFAULT_MS, True)
+
+# --- Hook-Polaritaet (per UART umschaltbar, im Flash gespeichert) ---
+
+def load_hook_polarity():
+    # Gespeicherte Polaritaet beim Boot laden. Datei fehlt (erste Box)
+    # oder kaputtes JSON -> still Code-Default behalten, nie crashen.
+    # Nur echte bool-Werte akzeptieren, alles andere ignorieren.
+    global hook_active_high
+    try:
+        with open(HOOK_CONFIG_FILE) as f:
+            cfg = json.loads(f.read())
+        if isinstance(cfg.get("hook_active_high"), bool):
+            hook_active_high = cfg["hook_active_high"]
+    except OSError:
+        pass            # Datei fehlt -> Code-Default (normal bei erster Box)
+    except ValueError:
+        pass            # kaputtes JSON -> Code-Default
+
+def save_hook_polarity():
+    # Polaritaet dauerhaft speichern. Atomar schreiben (erst .tmp, dann
+    # rename), damit ein Stromausfall waehrend des Schreibens keine halbe
+    # Datei hinterlaesst. Fehler (Flash voll, FS readonly) nur loggen,
+    # nie crashen - die FW muss auch bei Speicherproblemen weiterlaufen.
+    try:
+        tmp = HOOK_CONFIG_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps({"hook_active_high": hook_active_high}))
+        os.rename(tmp, HOOK_CONFIG_FILE)
+    except OSError:
+        if DEBUG:
+            print("Hook-Polaritaet konnte nicht gespeichert werden")
+
+def handle_set_hook_polarity(msg):
+    # Setzt die Hook-Polaritaet dauerhaft. Reihenfolge bewusst (Spec):
+    # Polaritaet setzen -> speichern -> Zustand neu lesen -> ok-Antwort
+    # -> hook-Event -> apply_hook_leds().
+    # WICHTIG: Alle drei Variablen ins global - fehlt hook_event_flag,
+    # legt MicroPython implizit eine lokale Variable an und der
+    # Debounce-Zustand bleibt stehen.
+    global hook_active, hook_active_high, hook_event_flag
+
+    value = msg.get("active_high")
+    if not isinstance(value, bool):
+        send_json({"status": "error", "cmd": "set_hook_polarity",
+                   "data": {"error": "active_high muss bool sein"}})
+        return
+
+    hook_active_high = value
+    save_hook_polarity()
+
+    hook_event_flag = False            # alte Flanke ist ungueltig
+    hook_active = is_hook_active_now() # Zustand mit neuer Polaritaet
+    send_json({"status": "ok", "cmd": "set_hook_polarity",
+               "data": {"hook_active_high": hook_active_high,
+                        "hook_active": hook_active}})
+    send_json({"event": "hook", "state": "active" if hook_active else "inactive"})
+    apply_hook_leds()
 
 # --- INA219 Sensoren ----------------------------------------------
 
@@ -773,8 +849,17 @@ def get_telemetry_response():
 # --- Setup und Loop ------------------------------------------------
 
 def setup():
+    global hook_active
+
     set_status_led(STATUS_RED)  # Status: not ready, bis der Host sich meldet
     init_hardware()
+
+    # Gespeicherte Hook-Polaritaet laden (Datei fehlt/kaputt -> Default).
+    # Danach den Startzustand mit der geladenen Polaritaet neu einlesen,
+    # weil init_hardware() oben noch mit dem Code-Default ausgewertet hat.
+    load_hook_polarity()
+    hook_active = is_hook_active_now()
+
     print(get_telemetry_response())  # einmal lesen, damit die INA219 Sensoren initialisiert werden
 
 def loop():

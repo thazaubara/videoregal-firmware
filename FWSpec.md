@@ -96,6 +96,41 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         }\n
         ```
     
+- Set Hook Polarity (dauerhaft gespeichert)
+    - Pi4 -> Pico:
+
+        ```json
+        {"cmd": "set_hook_polarity", "active_high": false}\n
+        ```
+
+    - Pico -> Pi4:
+
+        ```json
+        {"status": "ok", "cmd": "set_hook_polarity", "data": {"hook_active_high": false, "hook_active": true}}\n
+        ```
+
+        - active_high muss ein echtes JSON-boolean sein (true/false),
+          sonst Error-Antwort und KEINE Aenderung/kein Speichern.
+        - Direkt danach sendet der Pico ein normales hook-Event mit dem
+          neu ausgewerteten Zustand und setzt die LED-Grundstellung
+          (apply_hook_leds). Das ist gewollt: Der Pi braucht den
+          aktuellen Zustand nach jedem Set-Vorgang.
+        - Der Wert wird im Pico-Flash dauerhaft gespeichert
+          (/hook_config.json) und ueberlebt Reboot und Stromausfall.
+
+- Get Hook Polarity
+    - Pi4 -> Pico:
+
+        ```json
+        {"cmd": "get_hook_polarity"}\n
+        ```
+
+    - Pico -> Pi4:
+
+        ```json
+        {"status": "ok", "cmd": "get_hook_polarity", "data": {"hook_active_high": true}}\n
+        ```
+
 - Push Message (Hook)
   
     ```json
@@ -115,11 +150,13 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
 - Push Message (Boot)
 
     ```json
-    {"event": "boot"}\n
+    {"event": "boot", "hook_active_high": true}\n
     ```
     
     - Wird einmal beim Start des Pico gesendet, bevor auf den Pi4 gewartet wird.
       Der Pi4 kann das als "Pico ist bereit"-Signal nutzen.
+      hook_active_high = aktuell gespeicherte Hook-Polaritaet (additiv; alte
+      Pi-Apps ignorieren den zusaetzlichen Key).
 
 **Funktionen**
 
@@ -136,6 +173,10 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
     - Wenn Hook Flanke sich ändert, dann schick die Async Message an den Pi4.
     - Interrupt & Debounce! Debounce-Zeit: 30 ms.
     - Möglichkeit für einfache Umkehr der Logik in der Firmware (high vs low active)
+    - Hook-Polaritaet per UART umschaltbar (set_hook_polarity) und dauerhaft
+      im Pico-Flash gespeichert (/hook_config.json). HOOK_ACTIVE_HIGH im Code
+      ist nur noch der Default (erste Box / keine Config-Datei). DIN2 bleibt
+      unberuehrt (DIN2_ACTIVE_HIGH, kein Command).
     - Wenn sich flanke ändert, dann setze die leds gleich auf den passenden wert.
         - Hook active: Main LED “bright”, Logo LED “dim”
         - Hook inactive: Main LED “dim”, Logo LED “bright”
@@ -177,3 +218,17 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
         - If Interrupt flag set: react to that.
 - FW soll komplett basic bleiben. ich weiß man kann viel machen mit der hardware, aber das brauche ich jetzt noch nicht. upgrades gehen ja immer. nur die funktionen umsetzen die für den aktuellen betrieb notwendig sind.
 - FW soll so einfach geschrieben sein wie möglich. Keine Advanced Python Features, ich muss das in 2 Jahren auch noch lesen können.
+## Smoke-Test Hook-Polaritaet (per UART umschaltbar, dauerhaft gespeichert)
+
+1. get_hook_polarity -> hook_active_high: true (Default, keine Datei).
+2. Hoerer abheben -> hook-Event active; auflegen -> inactive (wie bisher).
+3. set_hook_polarity {"active_high": false} -> ok-Antwort, dann sofort
+   hook-Event mit INVERTIERTEM Zustand; LED-Grundstellung wechselt.
+4. get_telemetry -> digital_in.hook zeigt invertierten Wert.
+5. Nochmal abheben/auflegen -> Events weiterhin konsistent (invertiert).
+6. Pico stromlos machen, wieder an -> get_hook_polarity -> immer noch false.
+   (Der eigentliche Punkt des Features.)
+7. Fehlerfall: set_hook_polarity {"active_high": "nein"} (String) ->
+   Error-Antwort, Zustand unveraendert, nichts gespeichert.
+8. Datei loeschen (os.remove('/hook_config.json') ueber REPL) -> nach
+   Reboot wieder Default true.
