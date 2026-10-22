@@ -1,10 +1,36 @@
-## FW Spec (September 15, 2026, Rev 4)
+## FW Spec (Oktober 22, 2026, Rev 5)
 
-Die Firmware läuft auf einem Raspberry Pi Pico (RP2040), ist in MicroPython geschrieben und kommuniziert über UART (JSON, 115200 Baud) mit einem Raspberry Pi 4, der die übergeordnete Logik steuert. 
+Die Firmware läuft auf einem **Waveshare RP2350-Zero** (RP2350A), der auf das **Driver Board Rev 2.1** aufgelötet ist. Sie ist in MicroPython geschrieben und kommuniziert über UART (JSON, 115200 Baud) mit einem Raspberry Pi 4, der die übergeordnete Logik steuert.
+
+**Diese Firmware und diese Hardware gelten für ALLE Boxen** (RP2350-Zero + Driver Board 2.1 + offizielles RPI_PICO2-MicroPython, siehe „Flashing je Box"). Es gibt keine Board-Revisions-Weiche mehr.
 
 Sie bedient die Elektronik der Videoregal-Installation: ein Wählscheibentelefon, bei dem das Abheben des Hörers als Eingabe-Event dient, dazu steuerbare LEDs rundherum und ein eigenes, separat ansteuerbares LED-Schild. 
 
-Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahme übernimmt der Pi 4, während der Pico ausschließlich die Echtzeit-Elektronik kontrolliert. Der Pico sendet beim abheben des Hörers ein Event zum Pi, der dann die Videoaufnahme starten soll. 
+Kamera und Display gehören nicht zum RP2350-Zero-System. Die Videoaufnahme übernimmt der Pi 4, während der RP2350-Zero ausschließlich die Echtzeit-Elektronik kontrolliert. Er sendet beim Abheben des Hörers ein Event zum Pi, der dann die Videoaufnahme starten soll. 
+
+**Hardware / Pin-Map (Driver Board Rev 2.1)**
+
+Quelle: `pcb_ref/Schematic_2609 Videoregal Driver Board 2.1_*.pdf`, Layout-Screenshots und RP2350-Zero-Pinout in `pcb_ref/`.
+
+| Signal | GPIO | Anmerkung |
+| --- | --- | --- |
+| UART TX (zum Pi4) | GP0 | 115200 Baud |
+| UART RX (vom Pi4) | GP1 | 115200 Baud |
+| DIN1 (Hook / Hörer) | GP2 | Digital In, Pull-up, IRQ |
+| DIN2 (Debug) | GP3 | Digital In, Pull-up, IRQ |
+| I2C SDA | GP4 | INA219, 400 kHz |
+| I2C SCL | GP5 | INA219, 400 kHz |
+| GP6–GP13 | — | auf dem PCB nicht verwendet |
+| LOGO LED | GP14 | PWM, 40 kHz |
+| MAIN LED | GP15 | PWM, 40 kHz |
+| Status-LED | GP16 | Onboard-WS2812 des RP2350-Zero |
+| AIN2 | GP26 | ADC0 |
+| BRIGHTNESS POTI (AIN1) | GP27 | ADC1 |
+| GP28, GP29 | — | auf dem PCB nicht verwendet |
+
+**Wichtig zu GP16:** Er wird auf dem PCB **nicht herausgeführt**. Beim RP2350-Zero ist GP16 im Modul fest mit der Onboard-WS2812 (DIN) verbunden (Waveshare-Pinout: „WS2812 RGB LED used pin: GP16 | DIN", Demo: `ws2812_program_init(..., 16, ...)`). Der Pin gehört daher allein der Status-LED — es gibt auf dem 2.1-Board keinen Konflikt mit MAIN/LOGO.
+
+**Hinweis PWM-Slices:** GP15 (Slice 7/Ch1) und GP14 (Slice 7/Ch0) liegen auf demselben Slice, aber auf verschiedenen Channels. Duty-Cycles sind unabhängig, die Frequenz ist für beide identisch (40 kHz).
 
 **Geräte**
 
@@ -32,12 +58,19 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
 - LOGO LED
     - PWM Pin GP14
     - f=40 kHz
-- HOOK INPUT
+- STATUS LED (Onboard-WS2812 des RP2350-Zero)
+    - Datenpin GP16 (auf dem PCB nicht herausgeführt)
+    - Helligkeit fix 10 % (STATUS_BRIGHT = 26), unabhängig vom Poti
+    - Startup/Wartemodus: gelb, Fehler: rot, ready (Host verbunden): grün
+    - Nachricht rein ODER raus: kurzer blauer Blitz (300 ms)
+- HOOK INPUT (DIN1)
     - Digital In Pin GP2
-- DEBUG INPUT
+- DEBUG INPUT (DIN2)
     - Digital In Pin GP3
-- BRIGHTNESS POTI
+- BRIGHTNESS POTI (AIN1)
     - Analog In Pin GP27
+- AIN2
+    - Analog In Pin GP26
 
 **UART communication to host**
 
@@ -240,3 +273,50 @@ Kamera und Display gehören nicht zum Raspberry Pi Pico System. Die Videoaufnahm
    Error-Antwort, Zustand unveraendert, nichts gespeichert.
 8. Datei loeschen (os.remove('/hook_config.json') ueber REPL) -> nach
    Reboot wieder Default true.
+
+## Flashing je Box (Standard-Workflow)
+
+Gilt identisch fuer **alle** Boxen: Waveshare RP2350-Zero + Driver Board Rev 2.1.
+
+1. **BOOTSEL** halten und USB anstecken -> Laufwerk erscheint.
+2. `flash_nuke.uf2` ins Laufwerk ziehen -> Laufwerk entfernt sich selbst.
+3. **BOOTSEL** halten und USB anstecken -> Laufwerk erscheint.
+4. `RPI_PICO2-20260824-v1.29.0.uf2` ins Laufwerk ziehen -> Laufwerk entfernt sich selbst.
+5. In PyCharm (MicroPico-Plugin) die aktuelle `main.py` hochladen, dann Reset
+   (Soft-Reboot).
+6. Im REPL pruefen: Boot-Banner `=== main.py Boot === Firmware 2.1.5` erscheint,
+   und die Status-LED leuchtet **gelb**, weil der Pi4 noch nicht verbunden ist.
+
+**Dateien und Bezugsquellen**
+
+| Datei | Quelle | Anmerkung |
+| --- | --- | --- |
+| `flash_nuke.uf2` | https://datasheets.raspberrypi.com/soft/flash_nuke.uf2 | loescht den kompletten Flash (114.688 Bytes) |
+| `RPI_PICO2-20260824-v1.29.0.uf2` | https://micropython.org/resources/firmware/RPI_PICO2-20260824-v1.29.0.uf2 (Download-Seite: https://micropython.org/download/RPI_PICO2/) | offizieller Pico-2-Build, `MicroPython v1.29.0 on 2026-08-24`, 661.504 Bytes, SHA256 `6bfc5d110f293870f60150468dfeec8aec5323b57415a0b9a86e6c334e876e93` |
+
+- **Der Flash-Nuke-Schritt ist Pflicht**, wenn vorher ein anders konfigurierter
+  Build lief (z. B. der Waveshare-16MB-Build): das LittleFS-Layout passt sonst
+  nicht und MicroPython meldet `MicroPython filesystem scan failed … OSError: 84`.
+- **Nicht** die Variante „Firmware (RISC-V CPU mode)" derselben Download-Seite
+  verwenden.
+- Der alte Waveshare-Preview-Build
+  `WAVESHARE-RP2350A-20260609-v1.29.0-16MB.uf2` **wird nicht mehr verwendet**:
+  Preview-/„dirty"-Build aus Waveshares RP2350A-Library, mit dem die
+  Onboard-WS2812 auf GP16 dauerhaft weiss blieb und teils das Dateisystem
+  kaputtging.
+
+**Kontrolle nach dem Flashen (REPL)**
+
+```python
+import os
+print(os.uname())      # erwartet: 'Raspberry Pi Pico2 with RP2350', release '1.29.0'
+```
+
+**Status-LED-Verhalten zum Pruefen** (Onboard-WS2812 auf GP16, Helligkeit fix 10 %):
+
+| Zustand | Farbe |
+| --- | --- |
+| Startup / wartet auf Pi4 | gelb |
+| Fehler (ungueltige Nachricht, UART blockiert, Crash) | rot |
+| ready / UART-Loop (Pi4 verbunden) | gruen |
+| Nachricht rein ODER raus | blauer Kurzblitz (300 ms), danach zurueck auf Status |

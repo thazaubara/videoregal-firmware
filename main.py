@@ -1,18 +1,26 @@
 # =============================================================
 # Videoregal Firmware — Driver Board Rev 2.1
-# Waveshare RP2350-Zero (MicroPython, RP2350)
+# Waveshare RP2350-Zero (MicroPython, RP2350A), aufgeloetet auf das
+# Driver Board Rev 2.1
 # Kommunikation mit dem Pi4 ueber UART (JSON, 115200 Baud)
-# Siehe .workflow/spec.md (Firmware Rev 2.1 Pin-Map)
+# Siehe FWSpec.md (Pin-Map + Flashing je Box) und pcb_ref/
+# (Schaltplan, Layout, RP2350-Zero-Pinout)
 #
-# Portiert von der RP2040-Pico-Firmware (Rev 2.0):
-#   - Pin-Map: MAIN GP15->GP16, LOGO GP14->GP15, DIN2 GP3 offiziell,
-#     AIN2 GP26 (ADC0) neu, Rest gleich (Hook GP2, Poti GP27,
-#     I2C GP4/GP5, UART GP0/GP1)
-#   - Protokoll, boot-Event, wait_for_host-Breathing, Hook-Debounce,
-#     set_led/get_telemetry-Verhalten unveraendert
-#   - Neu im Telemetrie-Contract: analog_in.ain2 (additiv);
-#     digital_in.debug bleibt Schluesselname fuer DIN2/GP3
-#     (Protokoll-Kompatibilitaet zur Pi-Haupt-App v2)
+# Hardware — fuer ALLE Boxen identisch (Rev 2.1):
+#   - RP2350-Zero (Waveshare) mit MicroPython v1.29.0
+#     (offizieller RPI_PICO2-Build, siehe FWSpec.md "Flashing je Box")
+#   - MAIN_LED GP15, LOGO_LED GP14 (PWM, PWM_FREQ_HZ)
+#   - Status-LED = Onboard-WS2812 des RP2350-Zero auf GP16.
+#     GP16 ist auf dem PCB NICHT herausgefuehrt (Waveshare-Pinout:
+#     "WS2812 RGB LED used pin: GP16 | DIN") — der Pin gehoert
+#     allein der Status-LED, kein PWM-Ausgang liegt darauf.
+#   - DIN1 (Hook) GP2, DIN2 GP3, AIN1 (Helligkeits-Poti) GP27,
+#     AIN2 GP26, I2C SDA/SCL GP4/GP5, UART TX/RX GP0/GP1
+#
+# Protokoll (seit der Portierung unveraendert): boot-Event,
+# wait_for_host-Breathing, Hook-Debounce, set_led/get_telemetry.
+#   - analog_in.ain2 (additiv); digital_in.debug bleibt Schluesselname
+#     fuer DIN2/GP3 (Protokoll-Kompatibilitaet zur Pi-Haupt-App v2)
 #   - Rev 2.1.3: Neu "bat_charging" (bool) im get_telemetry-Contract
 #     (additiv). bat-p bekommt das Vorzeichen von bat-c, weil das
 #     INA219-Power-Register staets positive Werte meldet
@@ -22,23 +30,23 @@
 #     ready gruen, blauer Kurzblitz bei jeder Nachricht rein UND
 #     raus (vorher nur RX). GP16 wird schon beim Import auf low
 #     gezogen (weniger weisses Boot-Latchen).
+#   - Rev 2.1.5: Nur noch EINE Hardware (RP2350-Zero + PCB 2.1).
+#     BOARD_REV-Weiche entfernt, Pins fest (Main GP15 / Logo GP14 /
+#     WS2812 GP16), Kommentare und Doku auf diese Hardware gezogen.
 
 #
 # RP2350-Hinweise (MicroPython):
-#   - machine.Pin/PWM/UART/I2C-APIs sind API-kompatibel zum RP2040.
 #   - ADC-Kanalzuordnung: GP26 -> ADC0, GP27 -> ADC1, GP28 -> ADC2.
 #     machine.ADC(pin) mappt automatisch richtig; der interne
-#     Temperatursensor bleibt Kanal 4 (ADC(4)) — gleich wie RP2040.
-#   - PWM-Slices: RP2350 hat 12 Slices (je 2 Channels), Zuordnung
+#     Temperatursensor ist Kanal 4 (ADC(4)).
+#   - PWM-Slices: 12 Slices (je 2 Channels), Zuordnung
 #     slice = (pin // 2) % 12, channel = pin % 2.
-#       GP16 (MAIN) -> Slice 8, Channel 0
-#       GP15 (LOGO) -> Slice 7, Channel 1
-#     => keine Slice-Kollision, beide LEDs koennen unabhaengig
-#     gefadet werden. (Auf RP2040 lagen GP14/GP15 gemeinsam auf
-#     Slice 7 — das ist hier historia; GP15/GP16 teilen sich auch
-#     auf dem RP2350 keinen Slice.) pwm_main/pwm_logo bekommen
-#     trotzdem je ein eigenes PWM-Objekt; freq() wird pro Objekt
-#     gesetzt, was fuer beide Slices identisch gilt.
+#       GP15 (MAIN) -> Slice 7, Channel 1
+#       GP14 (LOGO) -> Slice 7, Channel 0
+#     => MAIN und LOGO liegen auf demselben Slice 7, aber auf
+#     verschiedenen Channels: die Duty-Cycles sind unabhaengig, die
+#     Frequenz ist fuer beide gleich (PWM_FREQ_HZ). pwm_main und
+#     pwm_logo bekommen je ein eigenes PWM-Objekt.
 # =============================================================
 
 # --- Imports -----------------------------------------------------
@@ -55,12 +63,12 @@ from machine import Pin, PWM, UART, I2C, ADC
 DEBUG = True  # Debug-Ausgaben ueber USB print() einschalten
 
 # Boot-Marker ganz am Anfang. WICHTIG: Prints, die vor dem Verbinden des
-# USB-Hosts (REPL) passieren, werden vom RP2040/RP2350 verworfen — der
+# USB-Hosts (REPL) passieren, werden vom RP2350 verworfen — der
 # Heartbeat in wait_for_host() sorgt dafuer, dass man nach dem Verbinden
 # trotzdem lebt-der-Pico-Ausgaben sieht.
 # Firmware-Versionsnummer. Wird beim Start ausgegeben und in der
 # Telemetrie mitgeliefert (Pi-App kann die Firmware-Version anzeigen).
-FIRMWARE_VERSION = "2.1.4"
+FIRMWARE_VERSION = "2.1.5"
 
 print("=== main.py Boot === Firmware", FIRMWARE_VERSION)
 
@@ -84,18 +92,14 @@ INA_CONFIG = 0x219F      # 32V Bus, +/-40mV Shunt-Range (4A * 0.01 Ohm), 12-bit,
 INA_CALIBRATION = 32768  # ergibt CurrentLSB = 0.125 mA und PowerLSB = 2.5 mW
 
 # LEDs (PWM, Helligkeit ueber Duty Cycle)
-# Board-Revision: 2.0 = Main GP15 / Logo GP14 / GP16 = WS2812-Status-LED,
-#                 2.1 = Main GP16 / Logo GP15 (kein WS2812)
-BOARD_REV = "2.0"
-
-if BOARD_REV == "2.0":
-    LED_MAIN_PIN = 15  # GP15
-    LED_LOGO_PIN = 14  # GP14
-    WS2812_PIN = 16    # GP16: WS2812-Status-LED (Firmware-Status)
-else:
-    LED_MAIN_PIN = 16  # GP16
-    LED_LOGO_PIN = 15  # GP15
-    WS2812_PIN = None
+# EINE Hardware fuer alle Boxen: RP2350-Zero auf Driver Board Rev 2.1.
+# Pin-Map der 2.1-Platine (pcb_ref/Schematic_2609 ... 2.1):
+#   MAIN_LED = GP15, LOGO_LED = GP14
+#   GP16 ist auf dem PCB NICHT herausgefuehrt und gehoert im Modul
+#   fest zur Onboard-WS2812 (dient nur als Status-LED).
+LED_MAIN_PIN = 15  # GP15 -> MAIN_LED
+LED_LOGO_PIN = 14  # GP14 -> LOGO_LED
+WS2812_PIN = 16    # GP16 -> Onboard-WS2812 des RP2350-Zero (Status-LED)
 
 # Status-Farben der WS2812. STATUS_BRIGHT ist die maximale Kanalintensitaet
 # und entspricht IMMER 10 % der vollen 8-Bit-Skala (255 * 0.10 = 25.5 -> 26).
@@ -118,9 +122,7 @@ WS2812_ORDER = "RGB"
 # Boots die Noise auf der noch offenen (floating) Datenleitung — typisch
 # WEISS. Ein low-Pegel verhindert weitere Zufallsrahmen, bis
 # set_status_led() den ersten gueltigen 24-Bit-Rahmen schreibt.
-_status_led_pin = None
-if WS2812_PIN is not None:
-    _status_led_pin = Pin(WS2812_PIN, Pin.OUT, value=0)
+_status_led_pin = Pin(WS2812_PIN, Pin.OUT, value=0)
 
 _ws2812_np = None  # gecachtes NeoPixel-Objekt (lazy in set_status_led)
 
@@ -192,13 +194,11 @@ def _restore_status():
 
 
 def set_status_led(color):
-    # Setzt die WS2812-Status-LED (nur Rev 2.0). Ein gueltiger 24-Bit-
-    # Rahmen ersetzt auch eine vorher gelatchte Farbe (z. B. weiss nach
-    # Soft-Boot). Der Pin ist oben schon als Ausgang/low angelegt.
-    # Fehler duerfen den Betrieb niemals blockieren.
+    # Setzt die Status-LED (Onboard-WS2812 des RP2350-Zero auf GP16).
+    # Ein gueltiger 24-Bit-Rahmen ersetzt auch eine vorher gelatchte
+    # Farbe (z. B. weiss nach dem Boot). Der Pin ist oben schon als
+    # Ausgang/low angelegt. Fehler duerfen den Betrieb nie blockieren.
     global _ws2812_np
-    if WS2812_PIN is None:
-        return
     try:
         if _ws2812_np is None:
             from neopixel import NeoPixel
@@ -230,7 +230,7 @@ HOOK_PIN = 2             # GP2 (unveraendert)
 HOOK_ACTIVE_HIGH = True  # Default-Polaritaet (wie bisher)
 HOOK_DEBOUNCE_MS = 30
 
-# Persistenz-File im Pico-Flash. WICHTIG: RP2040/RP2350-MicroPython
+# Persistenz-File im Flash des RP2350-Zero. WICHTIG: MicroPython
 # mountet das interne Flash am ROOT "/", nicht "/flash" (das ist eine
 # ESP32-Konvention - unter Pico-MicroPython scheitert /flash still).
 HOOK_CONFIG_FILE = "/hook_config.json"
@@ -249,7 +249,7 @@ AIN2_PIN = 26               # GP26 (ADC0)
 AIN2_HYSTERESIS_PERCENT = 5
 
 # Temperatur
-TEMP_ADC_ID = 4  # Interner Temperatursensor des RP2350 (Kanal 4, wie RP2040)
+TEMP_ADC_ID = 4  # Interner Temperatursensor des RP2350 (ADC-Kanal 4)
 
 # Akku (V-Mount 4S): 16.3 V = 100 %, 12.8 V = 20 % (kritisch),
 # 12.0 V = 10 %, 11.2 V = 0 % (Abschaltung). Dazwischen linear.
@@ -322,17 +322,17 @@ def init_hardware():
     init_ina219(INA_ADDR_5V)
     init_ina219(INA_ADDR_BAT)
 
-    # WS2812 (nur Rev 2.0, GP16): Die Status-LED wird von set_status_led()
-    # verwaltet — setup() setzt sie noch VOR init_hardware() auf gelb
-    # (Startup). Der Pin ist bereits beim Import auf low gezogen, ein
-    # gueltiger 24-Bit-Rahmen ueberschreibt damit auch eine waehrend des
-    # Boots evtl. gelatchte weisse Farbe.
+    # WS2812-Status-LED (Onboard-LED des RP2350-Zero, GP16): wird von
+    # set_status_led() verwaltet — setup() setzt sie noch VOR
+    # init_hardware() auf gelb (Startup). Der Pin ist bereits beim
+    # Import auf low gezogen, ein gueltiger 24-Bit-Rahmen ueberschreibt
+    # damit auch eine waehrend des Boots evtl. gelatchte weisse Farbe.
 
     # LEDs als PWM konfigurieren
-    # RP2350: GP16 -> Slice 8/Ch0, GP15 -> Slice 7/Ch1 (kein geteilter Slice,
-    # siehe Kommentar im Dateikopf). Einzelnes PWM-Objekt je LED.
-    # (Rev 2.0: GP15/GP14, GP16 bleibt WS2812-Pin und wird oben auf low
-    # gezogen — dann kann kein PWM-Ausgang mit der WS2812 kollidieren.)
+    # RP2350: GP15 (MAIN) -> Slice 7/Ch1, GP14 (LOGO) -> Slice 7/Ch0
+    # (siehe Kommentar im Dateikopf). Einzelnes PWM-Objekt je LED.
+    # (GP16 ist oben auf low gezogen und bleibt allein der
+    # Onboard-WS2812 — kein PWM-Ausgang kann dort kollidieren.)
     pwm_main = PWM(Pin(LED_MAIN_PIN))
     pwm_logo = PWM(Pin(LED_LOGO_PIN))
     pwm_main.freq(PWM_FREQ_HZ)
@@ -828,11 +828,10 @@ def get_battery_percent(volts):
     return 0  # unter 12.0 V -> 0 % (Abschaltung bei 11.2 V)
 
 def read_cpu_temp():
-    # Interner Temperatursensor des RP2350 (ADC Kanal 4).
-    # Formel wie beim RP2040 (Vbe 0.706 V bei 27 C, -1.721 mV/C).
-    # Auf dem RP2350 ist die Referenz ebenfalls 3.3 V; falls die
-    # MicroPython-Version des RP2350-Ports machine.temp_raw()/ADC-Temp
-    # anders skaliert, hier nachjustieren (Smoke-Test Punkt 9).
+    # Interner Temperatursensor des RP2350 (ADC-Kanal 4).
+    # Formel laut RP2350-Datenblatt (Vbe 0.706 V bei 27 C, -1.721 mV/C),
+    # Referenz 3.3 V. Falls eine MicroPython-Version anders skaliert,
+    # hier nachjustieren (Smoke-Test Punkt 9).
     voltage = temp_adc.read_u16() * 3.3 / 65535
     return 27 - (voltage - 0.706) / 0.001721
 
