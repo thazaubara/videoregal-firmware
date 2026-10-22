@@ -17,6 +17,12 @@
 #     (additiv). bat-p bekommt das Vorzeichen von bat-c, weil das
 #     INA219-Power-Register staets positive Werte meldet
 #     (Laden -> c < 0 und p < 0).
+#   - Rev 2.1.4: Status-LED (WS2812) ueberarbeitet — feste 10 %
+#     Helligkeit (STATUS_BRIGHT = 26), Startup gelb, Fehler rot,
+#     ready gruen, blauer Kurzblitz bei jeder Nachricht rein UND
+#     raus (vorher nur RX). GP16 wird schon beim Import auf low
+#     gezogen (weniger weisses Boot-Latchen).
+
 #
 # RP2350-Hinweise (MicroPython):
 #   - machine.Pin/PWM/UART/I2C-APIs sind API-kompatibel zum RP2040.
@@ -54,7 +60,7 @@ DEBUG = True  # Debug-Ausgaben ueber USB print() einschalten
 # trotzdem lebt-der-Pico-Ausgaben sieht.
 # Firmware-Versionsnummer. Wird beim Start ausgegeben und in der
 # Telemetrie mitgeliefert (Pi-App kann die Firmware-Version anzeigen).
-FIRMWARE_VERSION = "2.1.3"
+FIRMWARE_VERSION = "2.1.4"
 
 print("=== main.py Boot === Firmware", FIRMWARE_VERSION)
 
@@ -91,13 +97,15 @@ else:
     LED_LOGO_PIN = 15  # GP15
     WS2812_PIN = None
 
-# Status-Farben der WS2812. STATUS_BRIGHT skaliert alle Kanäle — 13 ≈ 10 %
-# von 128 (frueher Halbbrightness). LED soll moeglichst wenig Strom ziehen.
-STATUS_BRIGHT = 13
-STATUS_RED = (STATUS_BRIGHT, 0, 0)     # not ready / Fehler
-STATUS_YELLOW = (STATUS_BRIGHT, 10, 0) # wartet auf Host
-STATUS_GREEN = (0, STATUS_BRIGHT, 0)   # aktiv (Host verbunden)
-STATUS_BLUE = (0, 0, STATUS_BRIGHT)    # gueltige Nachricht empfangen (Kurzblitz)
+# Status-Farben der WS2812. STATUS_BRIGHT ist die maximale Kanalintensitaet
+# und entspricht IMMER 10 % der vollen 8-Bit-Skala (255 * 0.10 = 25.5 -> 26).
+# Die Status-LED ist vom Poti/Atmen unabhaengig, die Helligkeit ist damit fest.
+# Main-/Logo-PWM-LEDs (DIM_PERCENT/bright) sind davon unberuehrt.
+STATUS_BRIGHT = 26
+STATUS_RED = (STATUS_BRIGHT, 0, 0)                 # Fehler
+STATUS_YELLOW = (STATUS_BRIGHT, STATUS_BRIGHT, 0)  # Startup / wartet auf Host
+STATUS_GREEN = (0, STATUS_BRIGHT, 0)               # ready (Host verbunden)
+STATUS_BLUE = (0, 0, STATUS_BRIGHT)                # Nachricht rein/raus (Kurzblitz)
 
 # Kanalreihenfolge der LED. Das neopixel-Modul schreibt standardmaessig
 # GRB (WS2812-Datenblatt). Zeigt die LED die falsche Farbe (z. B. GRUEN
@@ -105,15 +113,26 @@ STATUS_BLUE = (0, 0, STATUS_BRIGHT)    # gueltige Nachricht empfangen (Kurzblitz
 # "RGB" eintragen.
 WS2812_ORDER = "RGB"
 
+# GP16 so frueh wie moeglich hart auf low treiben: Der WS2812 hat einen
+# eigenen Controller im Gehaeuse und latched waehrend des Pico/MicroPython-
+# Boots die Noise auf der noch offenen (floating) Datenleitung — typisch
+# WEISS. Ein low-Pegel verhindert weitere Zufallsrahmen, bis
+# set_status_led() den ersten gueltigen 24-Bit-Rahmen schreibt.
+_status_led_pin = None
+if WS2812_PIN is not None:
+    _status_led_pin = Pin(WS2812_PIN, Pin.OUT, value=0)
+
 _ws2812_np = None  # gecachtes NeoPixel-Objekt (lazy in set_status_led)
 
 # Diagnostik:
-#   - Gueltige Nachricht empfangen: kurzer BLAUER Blitz (RX_FLASH_MS),
-#     danach zurueck auf den Status (gruen, bzw. gelb im Wartemodus).
-#     Blinkt nur pro gueltiger Nachricht — Fragmente auf der Leitung
-#     verlaengern die Deadline nicht, die LED bleibt also nicht haengen.
+#   - Nachricht rein (RX, gueltig) ODER raus (TX, send_json): kurzer
+#     BLAUER Blitz (RX_FLASH_MS), danach schaltet update_status_led()
+#     zurueck auf den Status (gruen, bzw. gelb im Wartemodus). Blinkt nur
+#     pro Nachricht — Fragmente auf der Leitung verlaengern die Deadline
+#     nicht, die LED bleibt also nicht haengen.
 #   - Ungueltige Nachricht (Binaermuell / kein JSON / kein Objekt): ROT
-#     statt gelb, danach ebenfalls zurueck auf den Status.
+#     statt gelb, danach ebenfalls zurueck auf den Status. Rot hat
+#     Vorrang und wird von einem Blau-Blitz nicht ueberdeckt.
 RX_FLASH_MS = 300
 _rx_flash_until = None
 
@@ -132,23 +151,32 @@ def signal_soft_error():
     _status_error_until = time.ticks_add(time.ticks_ms(), STATUS_ERROR_HOLD_MS)
 
 
-def flash_rx_ok():
-    # Gueltige Nachricht am UART: kurzer blauer Blitz, danach schaltet
-    # update_status_led() zurueck auf den normalen Status.
+def flash_blue():
+    # Nachricht rein (RX) oder raus (TX): kurzer blauer Blitz, danach
+    # schaltet update_status_led() zurueck auf den normalen Status.
+    # Ein aktiver Fehler (rot) hat Vorrang und wird nicht ueberdeckt.
     global _rx_flash_until
+    if _status_error_until is not None:
+        return
     set_status_led(STATUS_BLUE)
     _rx_flash_until = time.ticks_add(time.ticks_ms(), RX_FLASH_MS)
 
 
+def flash_rx_ok():
+    # Gueltige Nachricht am UART (RX) -> kurzer blauer Blitz.
+    flash_blue()
+
+
 def update_status_led():
-    # Teil des Control-Loops: Blaulicht-RX-Blitz ausblenden und Soft-Fehler
+    # Teil des Control-Loops: Blau-Blitz (RX/TX) ausblenden und Soft-Fehler
     # (rot) zurueck auf den normalen Status schalten.
     global _status_error_until, _rx_flash_until
     now = time.ticks_ms()
     if _rx_flash_until is not None:
         if time.ticks_diff(now, _rx_flash_until) >= 0:
             _rx_flash_until = None
-            _restore_status()
+            if _status_error_until is None:  # Fehler hat Vorrang
+                _restore_status()
     if _status_error_until is not None:
         if time.ticks_diff(now, _status_error_until) >= 0:
             _status_error_until = None
@@ -166,14 +194,15 @@ def _restore_status():
 def set_status_led(color):
     # Setzt die WS2812-Status-LED (nur Rev 2.0). Ein gueltiger 24-Bit-
     # Rahmen ersetzt auch eine vorher gelatchte Farbe (z. B. weiss nach
-    # Soft-Boot). Fehler duerfen den Betrieb niemals blockieren.
+    # Soft-Boot). Der Pin ist oben schon als Ausgang/low angelegt.
+    # Fehler duerfen den Betrieb niemals blockieren.
     global _ws2812_np
     if WS2812_PIN is None:
         return
     try:
         if _ws2812_np is None:
             from neopixel import NeoPixel
-            _ws2812_np = NeoPixel(Pin(WS2812_PIN, Pin.OUT, value=0), 1)
+            _ws2812_np = NeoPixel(_status_led_pin, 1)
         if WS2812_ORDER == "RGB":
             # RGB-Variante: R und G tauschen, damit das neopixel-Modul
             # (GRB-Buffer) physikalisch R/G/B an die LED liefert.
@@ -294,9 +323,10 @@ def init_hardware():
     init_ina219(INA_ADDR_BAT)
 
     # WS2812 (nur Rev 2.0, GP16): Die Status-LED wird von set_status_led()
-    # verwaltet — setup() setzt sie noch VOR init_hardware() auf rot.
-    # Ein gueltiger 24-Bit-Rahmen ueberschreibt damit auch eine nach einem
-    # Soft-Boot evtl. gelatchte weisse Farbe.
+    # verwaltet — setup() setzt sie noch VOR init_hardware() auf gelb
+    # (Startup). Der Pin ist bereits beim Import auf low gezogen, ein
+    # gueltiger 24-Bit-Rahmen ueberschreibt damit auch eine waehrend des
+    # Boots evtl. gelatchte weisse Farbe.
 
     # LEDs als PWM konfigurieren
     # RP2350: GP16 -> Slice 8/Ch0, GP15 -> Slice 7/Ch1 (kein geteilter Slice,
@@ -598,6 +628,7 @@ def send_json(obj):
     # nach, bis der komplette Payload draussen ist. Der Timeout
     # verhindert, dass die Firmware bei blockiertem UART stecken bleibt.
     # gc.collect() raeumt den String-Heap danach auf.
+    flash_blue()  # TX: kurzer blauer Blitz (Nachricht geht raus)
     payload = json.dumps(obj).encode() + b"\n"
     deadline = time.ticks_add(time.ticks_ms(), SEND_TIMEOUT_MS)
     while payload:
@@ -868,7 +899,7 @@ def get_telemetry_response():
 def setup():
     global hook_active
 
-    set_status_led(STATUS_RED)  # Status: not ready, bis der Host sich meldet
+    set_status_led(STATUS_YELLOW)  # Status: Startup / wartet auf Host
     init_hardware()
 
     # Gespeicherte Hook-Polaritaet laden (Datei fehlt/kaputt -> Default).
